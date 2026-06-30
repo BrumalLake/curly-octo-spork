@@ -1,3 +1,6 @@
+[workspace]
+members = ["glfw-bindgen"]
+
 [package]
 name = "waves"
 version = "0.1.0"
