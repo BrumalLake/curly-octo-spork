@@ -1,7 +1,8 @@
-use render::TriangleApplication;
-
 mod render;
 
+use render::TriangleApplication;
+
 fn main() {
-	let application = TriangleApplication::render();
+	let mut application = TriangleApplication::default();
+	application.render();
 }
