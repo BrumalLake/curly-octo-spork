@@ -55,14 +55,16 @@ impl TriangleApplication {
 
 		// verify required extensions are all available
 		{
-			let extension_properties: HashSet<_> = unsafe {
-				entry.enumerate_instance_extension_properties(None).unwrap()
-				.into_iter().map(|e| CStr::from_ptr(e.extension_name.as_ptr())).collect()
-			};
+			let raw_extension_properties = unsafe { entry.enumerate_instance_extension_properties(None).unwrap() };
+			let extension_properties: HashSet<_> = raw_extension_properties
+			.iter()
+			.map(|e| e.extension_name_as_c_str().unwrap())
+			.collect();
 
-			for required_extension in unsafe { slice::from_raw_parts_mut(glfw_extensions, glfw_extension_count.try_into().unwrap()) } {
-				if !extension_properties.contains(unsafe { CStr::from_ptr(*required_extension) }) {
-					panic!();
+			for &mut required_extension in unsafe { slice::from_raw_parts_mut(glfw_extensions, glfw_extension_count.try_into().unwrap()) } {
+				let required_extension = unsafe { CStr::from_ptr(required_extension) };
+				if !extension_properties.contains(&required_extension) {
+					panic!("{required_extension:?} not found in {extension_properties:#?}");
 				}
 			}
 		}
