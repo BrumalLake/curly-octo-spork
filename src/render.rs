@@ -7,6 +7,8 @@ use glfw::{GLFW_CLIENT_API, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFWwindow,
 pub struct TriangleApplication {
 	window: *mut GLFWwindow,
 
+	// default is linked
+	entry: Entry,
 	instance: Option<Instance>
 }
 
@@ -36,8 +38,10 @@ impl TriangleApplication {
 	}
 
 	fn init_vulkan(&mut self) {
-		let entry = Entry::linked();
+		self.create_instance();
+	}
 
+	fn create_instance(&mut self) {
 		let application_info = ApplicationInfo::default()
 		.application_name(c"Hello Triangle")
 		.application_version(1)
@@ -55,7 +59,7 @@ impl TriangleApplication {
 
 		// verify required extensions are all available
 		{
-			let raw_extension_properties = unsafe { entry.enumerate_instance_extension_properties(None).unwrap() };
+			let raw_extension_properties = unsafe { self.entry.enumerate_instance_extension_properties(None).unwrap() };
 			let extension_properties: HashSet<_> = raw_extension_properties
 			.iter()
 			.map(|e| e.extension_name_as_c_str().unwrap())
@@ -76,7 +80,7 @@ impl TriangleApplication {
 		}
 		.application_info(&application_info);
 
-		self.instance = Some(unsafe { entry.create_instance(&instance_create_info, None).unwrap() });
+		self.instance = Some(unsafe { self.entry.create_instance(&instance_create_info, None).unwrap() });
 	}
 
 	fn main_loop(&self) {
