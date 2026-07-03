@@ -3,6 +3,6 @@ mod render;
 use render::TriangleApplication;
 
 fn main() {
-	let mut application = TriangleApplication::default();
+	let application = TriangleApplication::default();
 	application.render();
 }

@@ -11,7 +11,7 @@ pub struct TriangleApplication {
 }
 
 impl TriangleApplication {
-	pub fn render(&mut self) {
+	pub fn render(mut self) {
 		self.init_window();
 		self.init_vulkan();
 		self.main_loop();
@@ -86,7 +86,9 @@ impl TriangleApplication {
 		}}
 	}
 
-	fn cleanup(&self) {
+	fn cleanup(self) {
+		unsafe { self.instance.unwrap().destroy_instance(None); }
+		
 		unsafe {
 			glfwDestroyWindow(self.window);
 			glfwTerminate();
