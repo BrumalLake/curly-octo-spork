@@ -6,7 +6,7 @@ use std::{
 };
 
 use ash::{
-	Entry, Instance,
+	Device, Entry, Instance,
 	ext::debug_utils,
 	vk::{
 		self, API_VERSION_1_3, ApplicationInfo, DebugUtilsMessageSeverityFlagsEXT,
@@ -33,6 +33,8 @@ pub struct TriangleApplication {
 	debug_instance: Option<debug_utils::Instance>,
 	debug_messenger: DebugUtilsMessengerEXT,
 	physical_device: PhysicalDevice,
+	device: Option<Device>,
+	queue: Option<vk::Queue>,
 }
 
 impl TriangleApplication {
@@ -64,6 +66,7 @@ impl TriangleApplication {
 		self.create_instance();
 		self.setup_debug_messenger();
 		self.pick_physical_device();
+		self.create_logical_device();
 	}
 
 	fn create_instance(&mut self) {
@@ -276,6 +279,59 @@ impl TriangleApplication {
 		Ok(score)
 	}
 
+	fn create_logical_device(&mut self) {
+		let instance = self.instance.as_ref().unwrap();
+
+		let graphics_index: u32;
+		let queue_family_properties =
+			unsafe { instance.get_physical_device_queue_family_properties(self.physical_device) };
+		graphics_index = queue_family_properties
+			.iter()
+			.enumerate()
+			.find(|(_, properties)| properties.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+			.unwrap()
+			.0
+			.try_into()
+			.unwrap();
+
+		let queue_priority = &[0.5f32];
+
+		let device_queue_infos = &[vk::DeviceQueueCreateInfo::default()
+			.queue_priorities(queue_priority)
+			.queue_family_index(graphics_index)];
+
+		let mut vk11 = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
+		let mut vk13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
+		let mut extended_dynamic_state =
+			vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT::default()
+				.extended_dynamic_state(true);
+
+		let mut feature_chain = vk::PhysicalDeviceFeatures2::default()
+			.push_next(&mut extended_dynamic_state)
+			.push_next(&mut vk13)
+			.push_next(&mut vk11);
+
+		let required_device_extensions: Vec<*const c_char> = [vk::KHR_SWAPCHAIN_NAME]
+			.iter()
+			.map(|extension_name| extension_name.as_ptr())
+			.collect();
+
+		let device_create_info = vk::DeviceCreateInfo::default()
+			.push_next(&mut feature_chain)
+			.queue_create_infos(device_queue_infos)
+			.enabled_extension_names(&required_device_extensions);
+
+		let device = unsafe {
+			instance
+				.create_device(self.physical_device, &device_create_info, None)
+				.unwrap()
+		};
+
+		self.queue = Some(unsafe { device.get_device_queue(graphics_index, 0) });
+
+		self.device = Some(device);
+	}
+
 	fn main_loop(&self) {
 		unsafe {
 			while glfwWindowShouldClose(self.window) == GLFW_FALSE {
@@ -290,6 +346,7 @@ impl TriangleApplication {
 			self.debug_instance
 				.unwrap()
 				.destroy_debug_utils_messenger(self.debug_messenger, None);
+			self.device.unwrap().destroy_device(None);
 			self.instance.unwrap().destroy_instance(None);
 		}
 
