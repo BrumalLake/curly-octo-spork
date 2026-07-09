@@ -1,7 +1,7 @@
 use std::{
 	borrow::Cow,
 	collections::HashSet,
-	ffi::{CStr, c_char, c_void},
+	ffi::{CStr, c_char},
 	ptr::null_mut,
 };
 
@@ -249,14 +249,15 @@ impl TriangleApplication {
 
 		// supports all required features
 		if {
-			let mut device_features = vk::PhysicalDeviceFeatures2::default();
 			let mut vk11 = vk::PhysicalDeviceVulkan11Features::default();
 			let mut vk13 = vk::PhysicalDeviceVulkan13Features::default();
 			let mut extended_dynamic_state =
 				vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT::default();
-			vk13.p_next = &mut extended_dynamic_state as *mut _ as *mut c_void;
-			vk11.p_next = &mut vk13 as *mut _ as *mut c_void;
-			device_features.p_next = &mut vk11 as *mut _ as *mut c_void;
+
+			let mut device_features = vk::PhysicalDeviceFeatures2::default()
+				.push_next(&mut extended_dynamic_state)
+				.push_next(&mut vk13)
+				.push_next(&mut vk11);
 
 			unsafe { instance.get_physical_device_features2(device, &mut device_features) };
 
