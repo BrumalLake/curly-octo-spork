@@ -1,6 +1,6 @@
 use std::{
 	collections::HashSet,
-	ffi::{CStr, c_char},
+	ffi::{CStr, c_char, c_void},
 	ptr::null_mut,
 };
 
@@ -10,7 +10,7 @@ use ash::{
 	vk::{
 		self, API_VERSION_1_3, ApplicationInfo, DebugUtilsMessageSeverityFlagsEXT,
 		DebugUtilsMessageTypeFlagsEXT, DebugUtilsMessengerCreateInfoEXT, DebugUtilsMessengerEXT,
-		EXT_DEBUG_UTILS_NAME, InstanceCreateInfo,
+		EXT_DEBUG_UTILS_NAME, InstanceCreateInfo, PhysicalDevice, PhysicalDeviceType,
 	},
 };
 use glfw::{
@@ -31,6 +31,7 @@ pub struct TriangleApplication {
 	instance: Option<Instance>,
 	debug_instance: Option<debug_utils::Instance>,
 	debug_messenger: DebugUtilsMessengerEXT,
+	physical_device: PhysicalDevice,
 }
 
 impl TriangleApplication {
@@ -61,6 +62,7 @@ impl TriangleApplication {
 	fn init_vulkan(&mut self) {
 		self.create_instance();
 		self.setup_debug_messenger();
+		self.pick_physical_device();
 	}
 
 	fn create_instance(&mut self) {
@@ -169,6 +171,107 @@ impl TriangleApplication {
 				.unwrap();
 
 		self.debug_instance = Some(debug_instance);
+	}
+
+	fn pick_physical_device(&mut self) {
+		let physical_devices =
+			unsafe { self.instance.as_ref().unwrap().enumerate_physical_devices() }.unwrap();
+		if physical_devices.is_empty() {
+			panic!("failed to find GPU with Vulkan support");
+		}
+
+		let (mut high_score, mut best_device) = (0, None);
+
+		for device in physical_devices {
+			if let Ok(score) = self.score_device(device)
+				&& score >= high_score
+			{
+				high_score = score;
+				best_device = Some(device);
+			}
+		}
+
+		self.physical_device = best_device.expect("no suitable GPU found");
+	}
+
+	fn score_device(&self, device: PhysicalDevice) -> Result<u8, ()> {
+		let mut score = 0;
+		let instance = self.instance.as_ref().unwrap();
+		let device_properties = unsafe { instance.get_physical_device_properties(device) };
+
+		// check if device is suitable
+		// supports vulkan api 1.3
+		if !(device_properties.api_version >= API_VERSION_1_3) {
+			return Err(());
+		}
+
+		// graphics command queue support
+		if {
+			let queue_families =
+				unsafe { instance.get_physical_device_queue_family_properties(device) };
+			!queue_families
+				.into_iter()
+				.any(|queue_family| queue_family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+		} {
+			return Err(());
+		}
+
+		// supports all required extensions
+		if {
+			let required_device_extensions: Vec<*const c_char> = [vk::KHR_SWAPCHAIN_NAME]
+				.into_iter()
+				.map(|extension_name| extension_name.as_ptr())
+				.collect();
+			let device_supported_extensions = unsafe {
+				instance
+					.enumerate_device_extension_properties(device)
+					.unwrap()
+			};
+			let device_supported_extensions: HashSet<_> = device_supported_extensions
+				.iter()
+				.map(|extension| extension.extension_name_as_c_str().unwrap())
+				.collect();
+
+			let mut missing_extension = false;
+			for required_extension in required_device_extensions {
+				let required_extension = unsafe { CStr::from_ptr(required_extension) };
+				if !device_supported_extensions.contains(required_extension) {
+					missing_extension = true;
+					break;
+				}
+			}
+
+			missing_extension
+		} {
+			return Err(());
+		}
+
+		// supports all required features
+		if {
+			let mut device_features = vk::PhysicalDeviceFeatures2::default();
+			let mut vk11 = vk::PhysicalDeviceVulkan11Features::default();
+			let mut vk13 = vk::PhysicalDeviceVulkan13Features::default();
+			let mut extended_dynamic_state =
+				vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT::default();
+			vk13.p_next = &mut extended_dynamic_state as *mut _ as *mut c_void;
+			vk11.p_next = &mut vk13 as *mut _ as *mut c_void;
+			device_features.p_next = &mut vk11 as *mut _ as *mut c_void;
+
+			unsafe { instance.get_physical_device_features2(device, &mut device_features) };
+
+			!(device_features.features.geometry_shader == vk::TRUE
+				&& vk11.shader_draw_parameters == vk::TRUE
+				&& vk13.dynamic_rendering == vk::TRUE
+				&& extended_dynamic_state.extended_dynamic_state == vk::TRUE)
+		} {
+			return Err(());
+		}
+
+		if device_properties.device_type == PhysicalDeviceType::INTEGRATED_GPU {
+			score += 1;
+		}
+
+		Ok(score)
 	}
 
 	fn main_loop(&self) {
