@@ -7,11 +7,12 @@ fn main() {
 	println!("cargo:rustc-link-lib=glfw");
 
 	let bindings = bindgen::Builder::default()
-	.header("wrapper.h")
-	// glfw flags are i32
-	.default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
-	.generate()
-	.unwrap();
+		.header("wrapper.h")
+		// glfw flags are i32
+		.default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
+		.clang_arg("-DGLFW_INCLUDE_VULKAN")
+		.generate()
+		.unwrap();
 
 	let out_path = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("bindings.rs");
 	bindings.write_to_file(out_path).unwrap();

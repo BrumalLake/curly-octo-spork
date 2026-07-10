@@ -8,16 +8,17 @@ use std::{
 use ash::{
 	Device, Entry, Instance,
 	ext::debug_utils,
+	khr,
 	vk::{
 		self, API_VERSION_1_3, ApplicationInfo, DebugUtilsMessageSeverityFlagsEXT,
 		DebugUtilsMessageTypeFlagsEXT, DebugUtilsMessengerCreateInfoEXT, DebugUtilsMessengerEXT,
-		EXT_DEBUG_UTILS_NAME, InstanceCreateInfo, PhysicalDevice, PhysicalDeviceType,
+		EXT_DEBUG_UTILS_NAME, Handle, InstanceCreateInfo, PhysicalDevice, PhysicalDeviceType,
 	},
 };
 use glfw::{
 	GLFW_CLIENT_API, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFWwindow, glfwCreateWindow,
-	glfwDestroyWindow, glfwGetRequiredInstanceExtensions, glfwInit, glfwMakeContextCurrent,
-	glfwPollEvents, glfwSwapBuffers, glfwTerminate, glfwWindowHint, glfwWindowShouldClose,
+	glfwCreateWindowSurface, glfwDestroyWindow, glfwGetRequiredInstanceExtensions, glfwInit,
+	glfwPollEvents, glfwTerminate, glfwWindowHint, glfwWindowShouldClose,
 };
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
@@ -31,10 +32,12 @@ pub struct TriangleApplication {
 	entry: Entry,
 	instance: Option<Instance>,
 	debug_instance: Option<debug_utils::Instance>,
+	surface_instance: Option<khr::surface::Instance>,
 	debug_messenger: DebugUtilsMessengerEXT,
 	physical_device: PhysicalDevice,
 	device: Option<Device>,
 	queue: Option<vk::Queue>,
+	surface: vk::SurfaceKHR,
 }
 
 impl TriangleApplication {
@@ -52,19 +55,18 @@ impl TriangleApplication {
 		unsafe {
 			glfwInit();
 
-			// glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+			glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 			glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
 			self.window =
 				glfwCreateWindow(WIDTH, HEIGHT, c"Vulkan".as_ptr(), null_mut(), null_mut());
-
-			glfwMakeContextCurrent(self.window);
 		}
 	}
 
 	fn init_vulkan(&mut self) {
 		self.create_instance();
 		self.setup_debug_messenger();
+		self.create_surface();
 		self.pick_physical_device();
 		self.create_logical_device();
 	}
@@ -177,6 +179,21 @@ impl TriangleApplication {
 		self.debug_instance = Some(debug_instance);
 	}
 
+	fn create_surface(&mut self) {
+		if unsafe {
+			glfwCreateWindowSurface(
+				std::ptr::without_provenance_mut(
+					self.instance.as_ref().unwrap().handle().as_raw() as usize
+				),
+				self.window,
+				std::ptr::null(),
+				std::ptr::from_mut(&mut self.surface) as *mut _,
+			) != vk::Result::SUCCESS.as_raw()
+		} {
+			panic!("failed to create window surface");
+		}
+	}
+
 	fn pick_physical_device(&mut self) {
 		let physical_devices =
 			unsafe { self.instance.as_ref().unwrap().enumerate_physical_devices() }.unwrap();
@@ -281,6 +298,7 @@ impl TriangleApplication {
 
 	fn create_logical_device(&mut self) {
 		let instance = self.instance.as_ref().unwrap();
+		let surface_instance = khr::surface::Instance::new(&self.entry, instance);
 
 		let graphics_index: u32;
 		let queue_family_properties =
@@ -288,7 +306,17 @@ impl TriangleApplication {
 		graphics_index = queue_family_properties
 			.iter()
 			.enumerate()
-			.find(|(_, properties)| properties.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+			.find(|(i, properties)| {
+				properties.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+					&& unsafe {
+						surface_instance.get_physical_device_surface_support(
+							self.physical_device,
+							*i as u32,
+							self.surface,
+						)
+					}
+					.unwrap()
+			})
 			.unwrap()
 			.0
 			.try_into()
@@ -329,13 +357,13 @@ impl TriangleApplication {
 
 		self.queue = Some(unsafe { device.get_device_queue(graphics_index, 0) });
 
+		self.surface_instance = Some(surface_instance);
 		self.device = Some(device);
 	}
 
 	fn main_loop(&self) {
 		unsafe {
 			while glfwWindowShouldClose(self.window) == GLFW_FALSE {
-				glfwSwapBuffers(self.window);
 				glfwPollEvents();
 			}
 		}
@@ -343,6 +371,9 @@ impl TriangleApplication {
 
 	fn cleanup(self) {
 		unsafe {
+			self.surface_instance
+				.unwrap()
+				.destroy_surface(self.surface, None);
 			self.debug_instance
 				.unwrap()
 				.destroy_debug_utils_messenger(self.debug_messenger, None);
