@@ -93,9 +93,10 @@ impl TriangleApplication {
 			.collect();
 
 		for &required_layer in required_layers.iter() {
-			if !layer_names.contains(unsafe { CStr::from_ptr(required_layer) }) {
-				panic!("{required_layer:?} not found in {layer_names:#?}");
-			}
+			assert!(
+				layer_names.contains(unsafe { CStr::from_ptr(required_layer) }),
+				"{required_layer:?} not found in {layer_names:#?}"
+			);
 		}
 
 		let required_instance_extensions = Self::required_instance_extensions();
@@ -114,9 +115,10 @@ impl TriangleApplication {
 
 		for &required_extension in required_instance_extensions.iter() {
 			let required_extension = unsafe { CStr::from_ptr(required_extension) };
-			if !extension_properties.contains(&required_extension) {
-				panic!("{required_extension:?} not found in {extension_properties:#?}");
-			}
+			assert!(
+				extension_properties.contains(&required_extension),
+				"{required_extension:?} not found in {extension_properties:#?}",
+			);
 		}
 
 		let instance_create_info = InstanceCreateInfo::default()
@@ -135,12 +137,9 @@ impl TriangleApplication {
 		let mut res: Vec<*const c_char>;
 
 		let mut glfw_extension_count = 0;
-		let glfw_extensions = unsafe {
-			match glfwGetRequiredInstanceExtensions(&mut glfw_extension_count) {
-				res if res == null_mut() => panic!(),
-				res => res,
-			}
-		};
+		let glfw_extensions =
+			unsafe { glfwGetRequiredInstanceExtensions(&mut glfw_extension_count) };
+		assert!(!glfw_extensions.is_null());
 
 		res = unsafe {
 			std::slice::from_raw_parts(glfw_extensions, glfw_extension_count.try_into().unwrap())
@@ -180,26 +179,28 @@ impl TriangleApplication {
 	}
 
 	fn create_surface(&mut self) {
-		if unsafe {
-			glfwCreateWindowSurface(
-				std::ptr::without_provenance_mut(
-					self.instance.as_ref().unwrap().handle().as_raw() as usize
-				),
-				self.window,
-				std::ptr::null(),
-				std::ptr::from_mut(&mut self.surface) as *mut _,
-			) != vk::Result::SUCCESS.as_raw()
-		} {
-			panic!("failed to create window surface");
-		}
+		assert!(
+			unsafe {
+				glfwCreateWindowSurface(
+					std::ptr::without_provenance_mut(
+						self.instance.as_ref().unwrap().handle().as_raw() as usize,
+					),
+					self.window,
+					std::ptr::null(),
+					std::ptr::from_mut(&mut self.surface) as *mut _,
+				) == vk::Result::SUCCESS.as_raw()
+			},
+			"failed to create window surface"
+		);
 	}
 
 	fn pick_physical_device(&mut self) {
 		let physical_devices =
 			unsafe { self.instance.as_ref().unwrap().enumerate_physical_devices() }.unwrap();
-		if physical_devices.is_empty() {
-			panic!("failed to find GPU with Vulkan support");
-		}
+		assert!(
+			!physical_devices.is_empty(),
+			"failed to find GPU with Vulkan support"
+		);
 
 		let (mut high_score, mut best_device) = (0, None);
 
