@@ -52,7 +52,6 @@ impl TriangleApplication {
 		self.init_window();
 		self.init_vulkan();
 		self.main_loop();
-		self.cleanup();
 	}
 
 	fn init_window(&mut self) {
@@ -517,24 +516,29 @@ impl TriangleApplication {
 			}
 		}
 	}
+}
 
-	fn cleanup(self) {
+impl Drop for TriangleApplication {
+	fn drop(&mut self) {
 		unsafe {
-			let device = self.device.unwrap();
-			for imageview in self.image_views {
+			let device = self.device.as_ref().unwrap();
+			for &imageview in self.image_views.iter() {
 				device.destroy_image_view(imageview, None);
 			}
 			self.device_swapchain_functions
+				.as_ref()
 				.unwrap()
 				.destroy_swapchain(self.swapchain, None);
 			self.surface_instance
+				.as_ref()
 				.unwrap()
 				.destroy_surface(self.surface, None);
 			self.debug_instance
+				.as_ref()
 				.unwrap()
 				.destroy_debug_utils_messenger(self.debug_messenger, None);
 			device.destroy_device(None);
-			self.instance.unwrap().destroy_instance(None);
+			self.instance.as_ref().unwrap().destroy_instance(None);
 		}
 
 		unsafe {
