@@ -17,8 +17,9 @@ use ash::{
 };
 use glfw::{
 	GLFW_CLIENT_API, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFWwindow, glfwCreateWindow,
-	glfwCreateWindowSurface, glfwDestroyWindow, glfwGetRequiredInstanceExtensions, glfwInit,
-	glfwPollEvents, glfwTerminate, glfwWindowHint, glfwWindowShouldClose,
+	glfwCreateWindowSurface, glfwDestroyWindow, glfwGetFramebufferSize,
+	glfwGetRequiredInstanceExtensions, glfwInit, glfwPollEvents, glfwTerminate, glfwWindowHint,
+	glfwWindowShouldClose,
 };
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
@@ -38,6 +39,11 @@ pub struct TriangleApplication {
 	device: Option<Device>,
 	queue: Option<vk::Queue>,
 	surface: vk::SurfaceKHR,
+	device_swapchain_functions: Option<khr::swapchain::Device>,
+	swapchain: vk::SwapchainKHR,
+	swapchain_image: Vec<vk::Image>,
+	surface_format: vk::SurfaceFormatKHR,
+	extent: vk::Extent2D,
 }
 
 impl TriangleApplication {
@@ -69,6 +75,7 @@ impl TriangleApplication {
 		self.create_surface();
 		self.pick_physical_device();
 		self.create_logical_device();
+		self.create_swapchain();
 	}
 
 	fn create_instance(&mut self) {
@@ -301,10 +308,9 @@ impl TriangleApplication {
 		let instance = self.instance.as_ref().unwrap();
 		let surface_instance = khr::surface::Instance::new(&self.entry, instance);
 
-		let graphics_index: u32;
 		let queue_family_properties =
 			unsafe { instance.get_physical_device_queue_family_properties(self.physical_device) };
-		graphics_index = queue_family_properties
+		let graphics_index: u32 = queue_family_properties
 			.iter()
 			.enumerate()
 			.find(|(i, properties)| {
@@ -362,6 +368,124 @@ impl TriangleApplication {
 		self.device = Some(device);
 	}
 
+	fn create_swapchain(&mut self) {
+		let surface_instance = self.surface_instance.as_ref().unwrap();
+
+		let surface_capabilities = unsafe {
+			surface_instance
+				.get_physical_device_surface_capabilities(self.physical_device, self.surface)
+		}
+		.unwrap();
+		let extent = self.choose_extent(&surface_capabilities);
+		let min_image_count = Self::choose_min_image_count(&surface_capabilities);
+
+		let available_formats = unsafe {
+			surface_instance.get_physical_device_surface_formats(self.physical_device, self.surface)
+		}
+		.unwrap();
+		let surface_format = Self::choose_surface_format(&available_formats);
+
+		let available_presentmodes = unsafe {
+			surface_instance
+				.get_physical_device_surface_present_modes(self.physical_device, self.surface)
+		}
+		.unwrap();
+		let present_mode = Self::choose_present_mode(&available_presentmodes);
+
+		let create_info = vk::SwapchainCreateInfoKHR::default()
+			.surface(self.surface)
+			.min_image_count(min_image_count)
+			.image_format(surface_format.format)
+			.image_color_space(surface_format.color_space)
+			.image_extent(extent)
+			.image_array_layers(1)
+			.image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+			.image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+			.pre_transform(surface_capabilities.current_transform)
+			.composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+			.present_mode(present_mode)
+			.clipped(true);
+
+		let device_swapchain_functions = khr::swapchain::Device::new(
+			self.instance.as_ref().unwrap(),
+			self.device.as_ref().unwrap(),
+		);
+
+		self.swapchain =
+			unsafe { device_swapchain_functions.create_swapchain(&create_info, None) }.unwrap();
+		self.swapchain_image =
+			unsafe { device_swapchain_functions.get_swapchain_images(self.swapchain) }.unwrap();
+		self.device_swapchain_functions = Some(device_swapchain_functions);
+		self.extent = extent;
+		self.surface_format = surface_format;
+	}
+
+	fn choose_surface_format(available_formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
+		assert!(!available_formats.is_empty());
+
+		*available_formats
+			.iter()
+			.find(|format| {
+				format.format == vk::Format::B8G8R8A8_SRGB
+					&& format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+			})
+			.unwrap_or_else(|| &available_formats[0])
+	}
+
+	fn choose_present_mode(available_modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
+		debug_assert!(
+			available_modes
+				.iter()
+				.any(|&mode| mode == vk::PresentModeKHR::FIFO)
+		);
+
+		if available_modes
+			.iter()
+			.any(|&mode| mode == vk::PresentModeKHR::MAILBOX)
+		{
+			vk::PresentModeKHR::MAILBOX
+		} else {
+			vk::PresentModeKHR::FIFO
+		}
+	}
+
+	fn choose_extent(&self, capabilities: &vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
+		if capabilities.current_extent.width != u32::MAX {
+			return capabilities.current_extent;
+		}
+
+		let mut width = -1;
+		let mut height = -1;
+		unsafe {
+			glfwGetFramebufferSize(self.window, &mut width, &mut height);
+		}
+		let width: u32 = width.try_into().unwrap();
+		let height: u32 = height.try_into().unwrap();
+
+		vk::Extent2D {
+			width: width.clamp(
+				capabilities.min_image_extent.width,
+				capabilities.max_image_extent.width,
+			),
+			height: height.clamp(
+				capabilities.min_image_extent.height,
+				capabilities.max_image_extent.height,
+			),
+		}
+	}
+
+	fn choose_min_image_count(capabilities: &vk::SurfaceCapabilitiesKHR) -> u32 {
+		let mut min_image_count = capabilities.min_image_count.max(3);
+
+		if 0 < capabilities.max_image_count
+			&& capabilities.max_image_count < capabilities.min_image_count
+		{
+			min_image_count = capabilities.max_image_count;
+		}
+
+		min_image_count
+	}
+
 	fn main_loop(&self) {
 		unsafe {
 			while glfwWindowShouldClose(self.window) == GLFW_FALSE {
@@ -372,6 +496,9 @@ impl TriangleApplication {
 
 	fn cleanup(self) {
 		unsafe {
+			self.device_swapchain_functions
+				.unwrap()
+				.destroy_swapchain(self.swapchain, None);
 			self.surface_instance
 				.unwrap()
 				.destroy_surface(self.surface, None);
