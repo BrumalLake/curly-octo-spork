@@ -41,9 +41,10 @@ pub struct TriangleApplication {
 	surface: vk::SurfaceKHR,
 	device_swapchain_functions: Option<khr::swapchain::Device>,
 	swapchain: vk::SwapchainKHR,
-	swapchain_image: Vec<vk::Image>,
 	surface_format: vk::SurfaceFormatKHR,
 	extent: vk::Extent2D,
+	swapchain_image: Vec<vk::Image>,
+	image_views: Vec<vk::ImageView>,
 }
 
 impl TriangleApplication {
@@ -76,6 +77,7 @@ impl TriangleApplication {
 		self.pick_physical_device();
 		self.create_logical_device();
 		self.create_swapchain();
+		self.create_imageviews();
 	}
 
 	fn create_instance(&mut self) {
@@ -486,6 +488,28 @@ impl TriangleApplication {
 		min_image_count
 	}
 
+	fn create_imageviews(&mut self) {
+		let mut create_info = vk::ImageViewCreateInfo::default()
+			.view_type(vk::ImageViewType::TYPE_2D)
+			.format(self.surface_format.format)
+			.subresource_range(vk::ImageSubresourceRange {
+				aspect_mask: vk::ImageAspectFlags::COLOR,
+				base_mip_level: 0,
+				level_count: 1,
+				base_array_layer: 0,
+				layer_count: 1,
+			});
+
+		self.image_views.reserve_exact(self.swapchain_image.len());
+
+		let device = self.device.as_ref().unwrap();
+		for &image in self.swapchain_image.iter() {
+			create_info = create_info.image(image);
+			self.image_views
+				.push(unsafe { device.create_image_view(&create_info, None) }.unwrap());
+		}
+	}
+
 	fn main_loop(&self) {
 		unsafe {
 			while glfwWindowShouldClose(self.window) == GLFW_FALSE {
@@ -496,6 +520,10 @@ impl TriangleApplication {
 
 	fn cleanup(self) {
 		unsafe {
+			let device = self.device.unwrap();
+			for imageview in self.image_views {
+				device.destroy_image_view(imageview, None);
+			}
 			self.device_swapchain_functions
 				.unwrap()
 				.destroy_swapchain(self.swapchain, None);
@@ -505,7 +533,7 @@ impl TriangleApplication {
 			self.debug_instance
 				.unwrap()
 				.destroy_debug_utils_messenger(self.debug_messenger, None);
-			self.device.unwrap().destroy_device(None);
+			device.destroy_device(None);
 			self.instance.unwrap().destroy_instance(None);
 		}
 
