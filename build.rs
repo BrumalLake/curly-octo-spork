@@ -1,7 +1,12 @@
-use std::process::{self, Command};
+use std::{
+	path::PathBuf,
+	process::{self, Command},
+};
 
 fn main() {
 	println!("cargo::rerun-if-changed=shaders/shader.slang");
+
+	let out_path = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("shader.spv");
 
 	if let Ok(status) = Command::new("slangc")
 		.args([
@@ -17,8 +22,8 @@ fn main() {
 			"-entry",
 			"fragment_main",
 			"-o",
-			"shaders/shader.spv",
 		])
+		.arg(out_path.as_os_str())
 		.spawn()
 		.unwrap()
 		.wait()
