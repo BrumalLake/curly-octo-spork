@@ -15,14 +15,14 @@ use ash::{
 		self, API_VERSION_1_3, ApplicationInfo, DebugUtilsMessageSeverityFlagsEXT,
 		DebugUtilsMessageTypeFlagsEXT, DebugUtilsMessengerCreateInfoEXT, DebugUtilsMessengerEXT,
 		EXT_DEBUG_UTILS_NAME, GraphicsPipelineCreateInfo, Handle, InstanceCreateInfo,
-		PhysicalDevice, PhysicalDeviceType, PipelineRasterizationStateCreateInfo,
+		PhysicalDevice, PhysicalDeviceType,
 	},
 };
 use glfw::{
-	GLFW_CLIENT_API, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFWwindow, glfwCreateWindow,
-	glfwCreateWindowSurface, glfwDestroyWindow, glfwGetFramebufferSize,
-	glfwGetRequiredInstanceExtensions, glfwInit, glfwPollEvents, glfwTerminate, glfwWindowHint,
-	glfwWindowShouldClose,
+	GLFW_CLIENT_API, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFW_TRUE, GLFWwindow,
+	glfwCreateWindow, glfwCreateWindowSurface, glfwDestroyWindow, glfwGetFramebufferSize,
+	glfwGetRequiredInstanceExtensions, glfwInit, glfwPollEvents, glfwSetWindowShouldClose,
+	glfwTerminate, glfwWindowHint, glfwWindowShouldClose,
 };
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
@@ -51,6 +51,7 @@ pub struct TriangleApplication {
 	extent: vk::Extent2D,
 	swapchain_image: Vec<vk::Image>,
 	image_views: Vec<vk::ImageView>,
+	shader_module: vk::ShaderModule,
 	pipeline_layout: vk::PipelineLayout,
 	pipeline: vk::Pipeline,
 }
@@ -528,6 +529,8 @@ impl TriangleApplication {
 			.module(shader_module)
 			.name(c"fragment_main");
 
+		self.shader_module = shader_module;
+
 		let stages = &[vertex_stage_info, fragment_stage_info];
 
 		let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
@@ -631,6 +634,8 @@ impl TriangleApplication {
 	fn main_loop(&self) {
 		unsafe {
 			while glfwWindowShouldClose(self.window) == GLFW_FALSE {
+				// for cleanup testing as the window will not appear before a frame is submitted
+				glfwSetWindowShouldClose(self.window, GLFW_TRUE);
 				glfwPollEvents();
 			}
 		}
@@ -641,6 +646,9 @@ impl Drop for TriangleApplication {
 	fn drop(&mut self) {
 		unsafe {
 			let device = self.device.as_ref().unwrap();
+			device.destroy_pipeline(self.pipeline, None);
+			device.destroy_pipeline_layout(self.pipeline_layout, None);
+			device.destroy_shader_module(self.shader_module, None);
 			for &imageview in self.image_views.iter() {
 				device.destroy_image_view(imageview, None);
 			}
