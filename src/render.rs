@@ -2,6 +2,8 @@ use std::{
 	borrow::Cow,
 	collections::HashSet,
 	ffi::{CStr, c_char},
+	fs::File,
+	path::Path,
 	ptr::null_mut,
 };
 
@@ -12,7 +14,8 @@ use ash::{
 	vk::{
 		self, API_VERSION_1_3, ApplicationInfo, DebugUtilsMessageSeverityFlagsEXT,
 		DebugUtilsMessageTypeFlagsEXT, DebugUtilsMessengerCreateInfoEXT, DebugUtilsMessengerEXT,
-		EXT_DEBUG_UTILS_NAME, Handle, InstanceCreateInfo, PhysicalDevice, PhysicalDeviceType,
+		EXT_DEBUG_UTILS_NAME, GraphicsPipelineCreateInfo, Handle, InstanceCreateInfo,
+		PhysicalDevice, PhysicalDeviceType, PipelineRasterizationStateCreateInfo,
 	},
 };
 use glfw::{
@@ -24,6 +27,9 @@ use glfw::{
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
 const VALIDATION_LAYERS: &[&CStr] = &[c"VK_LAYER_KHRONOS_validation"];
+
+const WIDTH: i32 = 800;
+const HEIGHT: i32 = 600;
 
 #[derive(Default)]
 pub struct TriangleApplication {
@@ -45,6 +51,8 @@ pub struct TriangleApplication {
 	extent: vk::Extent2D,
 	swapchain_image: Vec<vk::Image>,
 	image_views: Vec<vk::ImageView>,
+	pipeline_layout: vk::PipelineLayout,
+	pipeline: vk::Pipeline,
 }
 
 impl TriangleApplication {
@@ -55,9 +63,6 @@ impl TriangleApplication {
 	}
 
 	fn init_window(&mut self) {
-		const WIDTH: i32 = 800;
-		const HEIGHT: i32 = 600;
-
 		unsafe {
 			glfwInit();
 
@@ -77,6 +82,7 @@ impl TriangleApplication {
 		self.create_logical_device();
 		self.create_swapchain();
 		self.create_imageviews();
+		self.create_graphics_pipeline();
 	}
 
 	fn create_instance(&mut self) {
@@ -507,6 +513,119 @@ impl TriangleApplication {
 			self.image_views
 				.push(unsafe { device.create_image_view(&create_info, None) }.unwrap());
 		}
+	}
+
+	fn create_graphics_pipeline(&mut self) {
+		let shader_module = self.create_shader_module(concat!(env!("OUT_DIR"), "/shader.spv"));
+
+		let vertex_stage_info = vk::PipelineShaderStageCreateInfo::default()
+			.stage(vk::ShaderStageFlags::VERTEX)
+			.module(shader_module)
+			.name(c"vertex_main");
+
+		let fragment_stage_info = vk::PipelineShaderStageCreateInfo::default()
+			.stage(vk::ShaderStageFlags::FRAGMENT)
+			.module(shader_module)
+			.name(c"fragment_main");
+
+		let stages = &[vertex_stage_info, fragment_stage_info];
+
+		let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+
+		let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+			.topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+
+		let viewports = &[vk::Viewport {
+			x: 0.0,
+			y: 0.0,
+			width: WIDTH as f32,
+			height: HEIGHT as f32,
+			min_depth: 0.0,
+			max_depth: 1.0,
+		}];
+
+		let scissors = &[vk::Rect2D {
+			offset: vk::Offset2D { x: 0, y: 0 },
+			extent: self.extent,
+		}];
+
+		let dynamic_states = &[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+		let dynamic_state_info =
+			vk::PipelineDynamicStateCreateInfo::default().dynamic_states(dynamic_states);
+
+		let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+			.viewports(viewports)
+			.scissors(scissors);
+
+		let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+			.depth_clamp_enable(false)
+			.rasterizer_discard_enable(false)
+			.polygon_mode(vk::PolygonMode::FILL)
+			.cull_mode(vk::CullModeFlags::BACK)
+			.front_face(vk::FrontFace::CLOCKWISE)
+			.depth_bias_enable(false)
+			.line_width(1.0);
+
+		let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+			.rasterization_samples(vk::SampleCountFlags::TYPE_1)
+			.sample_shading_enable(false);
+
+		let color_blend_attachments = &[vk::PipelineColorBlendAttachmentState::default()
+			.blend_enable(false)
+			.color_write_mask(
+				vk::ColorComponentFlags::R
+					| vk::ColorComponentFlags::G
+					| vk::ColorComponentFlags::G
+					| vk::ColorComponentFlags::A,
+			)];
+
+		let color_blend =
+			vk::PipelineColorBlendStateCreateInfo::default().attachments(color_blend_attachments);
+
+		let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+		self.pipeline_layout = unsafe {
+			self.device
+				.as_ref()
+				.unwrap()
+				.create_pipeline_layout(&pipeline_layout_info, None)
+		}
+		.unwrap();
+
+		let color_attachment_formats = &[self.surface_format.format];
+
+		let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfo::default()
+			.color_attachment_formats(color_attachment_formats);
+
+		let create_infos = &[GraphicsPipelineCreateInfo::default()
+			.stages(stages)
+			.vertex_input_state(&vertex_input)
+			.input_assembly_state(&input_assembly)
+			.viewport_state(&viewport_state)
+			.rasterization_state(&rasterizer)
+			.multisample_state(&multisampling)
+			.color_blend_state(&color_blend)
+			.dynamic_state(&dynamic_state_info)
+			.layout(self.pipeline_layout)
+			.push_next(&mut pipeline_rendering_info)];
+
+		self.pipeline = unsafe {
+			self.device.as_ref().unwrap().create_graphics_pipelines(
+				vk::PipelineCache::null(),
+				create_infos,
+				None,
+			)
+		}
+		.unwrap()[0];
+	}
+
+	fn create_shader_module<P: AsRef<Path>>(&self, shader_path: P) -> vk::ShaderModule {
+		let device = self.device.as_ref().unwrap();
+
+		let mut file = File::open(shader_path).unwrap();
+		let shader_code = ash::util::read_spv(&mut file).unwrap();
+
+		let create_info = vk::ShaderModuleCreateInfo::default().code(&shader_code);
+		unsafe { device.create_shader_module(&create_info, None) }.unwrap()
 	}
 
 	fn main_loop(&self) {
