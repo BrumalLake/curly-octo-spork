@@ -47,6 +47,7 @@ pub struct TriangleApplication {
 	surface: vk::SurfaceKHR,
 	device_swapchain_functions: Option<khr::swapchain::Device>,
 	swapchain: vk::SwapchainKHR,
+	graphics_queue_index: u32,
 	surface_format: vk::SurfaceFormatKHR,
 	extent: vk::Extent2D,
 	swapchain_image: Vec<vk::Image>,
@@ -54,6 +55,8 @@ pub struct TriangleApplication {
 	shader_module: vk::ShaderModule,
 	pipeline_layout: vk::PipelineLayout,
 	pipeline: vk::Pipeline,
+	command_pool: vk::CommandPool,
+	command_buffer: vk::CommandBuffer,
 }
 
 impl TriangleApplication {
@@ -84,6 +87,8 @@ impl TriangleApplication {
 		self.create_swapchain();
 		self.create_imageviews();
 		self.create_graphics_pipeline();
+		self.create_command_pool();
+		self.create_command_buffer();
 	}
 
 	fn create_instance(&mut self) {
@@ -318,7 +323,7 @@ impl TriangleApplication {
 
 		let queue_family_properties =
 			unsafe { instance.get_physical_device_queue_family_properties(self.physical_device) };
-		let graphics_index: u32 = queue_family_properties
+		self.graphics_queue_index = queue_family_properties
 			.iter()
 			.enumerate()
 			.find(|(i, properties)| {
@@ -341,7 +346,7 @@ impl TriangleApplication {
 
 		let device_queue_infos = &[vk::DeviceQueueCreateInfo::default()
 			.queue_priorities(queue_priority)
-			.queue_family_index(graphics_index)];
+			.queue_family_index(self.graphics_queue_index)];
 
 		let mut vk11 = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 		let mut vk13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
@@ -370,7 +375,7 @@ impl TriangleApplication {
 				.unwrap()
 		};
 
-		self.queue = Some(unsafe { device.get_device_queue(graphics_index, 0) });
+		self.queue = Some(unsafe { device.get_device_queue(self.graphics_queue_index, 0) });
 
 		self.surface_instance = Some(surface_instance);
 		self.device = Some(device);
@@ -629,6 +634,153 @@ impl TriangleApplication {
 
 		let create_info = vk::ShaderModuleCreateInfo::default().code(&shader_code);
 		unsafe { device.create_shader_module(&create_info, None) }.unwrap()
+	}
+
+	fn create_command_pool(&mut self) {
+		let create_info = vk::CommandPoolCreateInfo::default()
+			.flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+			.queue_family_index(self.graphics_queue_index);
+
+		self.command_pool = unsafe {
+			self.device
+				.as_ref()
+				.unwrap()
+				.create_command_pool(&create_info, None)
+		}
+		.unwrap();
+	}
+
+	fn create_command_buffer(&mut self) {
+		let alloc_info = vk::CommandBufferAllocateInfo::default()
+			.command_pool(self.command_pool)
+			.level(vk::CommandBufferLevel::PRIMARY)
+			.command_buffer_count(1);
+
+		self.command_buffer = unsafe {
+			self.device
+				.as_ref()
+				.unwrap()
+				.allocate_command_buffers(&alloc_info)
+		}
+		.unwrap()[0];
+	}
+
+	fn record_command_buffer(&mut self, image_index: u32) {
+		let device = self.device.as_ref().unwrap();
+
+		unsafe {
+			device.begin_command_buffer(self.command_buffer, &vk::CommandBufferBeginInfo::default())
+		}
+		.unwrap();
+
+		self.transition_image_layout(
+			vk::ImageLayout::UNDEFINED,
+			vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+			vk::AccessFlags2::empty(),
+			vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+			vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+			vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+			image_index,
+		);
+
+		let color_attachments = &[vk::RenderingAttachmentInfo::default()
+			.image_view(self.image_views[image_index as usize])
+			.image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+			.load_op(vk::AttachmentLoadOp::CLEAR)
+			.store_op(vk::AttachmentStoreOp::STORE)
+			.clear_value(vk::ClearValue {
+				color: vk::ClearColorValue {
+					float32: [0.0, 0.0, 0.0, 1.0],
+				},
+			})];
+
+		let rendering_info = vk::RenderingInfo::default()
+			.render_area(vk::Rect2D {
+				offset: vk::Offset2D { x: 0, y: 0 },
+				extent: self.extent,
+			})
+			.layer_count(1)
+			.color_attachments(color_attachments);
+
+		unsafe {
+			device.cmd_begin_rendering(self.command_buffer, &rendering_info);
+
+			device.cmd_set_viewport(
+				self.command_buffer,
+				0,
+				&[vk::Viewport {
+					x: 0.0,
+					y: 0.0,
+					width: self.extent.width as f32,
+					height: self.extent.height as f32,
+					min_depth: 0.0,
+					max_depth: 0.0,
+				}],
+			);
+
+			device.cmd_set_scissor(
+				self.command_buffer,
+				0,
+				&[vk::Rect2D {
+					offset: vk::Offset2D { x: 0, y: 0 },
+					extent: self.extent,
+				}],
+			);
+
+			device.cmd_draw(self.command_buffer, 3, 1, 0, 0);
+
+			device.cmd_end_rendering(self.command_buffer);
+		}
+
+		self.transition_image_layout(
+			vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+			vk::ImageLayout::PRESENT_SRC_KHR,
+			vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+			vk::AccessFlags2::empty(),
+			vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+			vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+			image_index,
+		);
+
+		unsafe {
+			device.end_command_buffer(self.command_buffer).unwrap();
+		}
+	}
+
+	fn transition_image_layout(
+		&self,
+		old_layout: vk::ImageLayout,
+		new_layout: vk::ImageLayout,
+		src_access_mask: vk::AccessFlags2,
+		dst_access_mask: vk::AccessFlags2,
+		src_stage_mask: vk::PipelineStageFlags2,
+		dst_stage_mask: vk::PipelineStageFlags2,
+		image_index: u32,
+	) {
+		let barrier = &[vk::ImageMemoryBarrier2::default()
+			.old_layout(old_layout)
+			.new_layout(new_layout)
+			.src_access_mask(src_access_mask)
+			.dst_access_mask(dst_access_mask)
+			.src_stage_mask(src_stage_mask)
+			.dst_stage_mask(dst_stage_mask)
+			.image(self.swapchain_image[image_index as usize])
+			.subresource_range(vk::ImageSubresourceRange {
+				aspect_mask: vk::ImageAspectFlags::COLOR,
+				base_mip_level: 0,
+				level_count: 1,
+				base_array_layer: 0,
+				layer_count: 1,
+			})];
+
+		let dependency_info = vk::DependencyInfo::default().image_memory_barriers(barrier);
+
+		unsafe {
+			self.device
+				.as_ref()
+				.unwrap()
+				.cmd_pipeline_barrier2(self.command_buffer, &dependency_info)
+		};
 	}
 
 	fn main_loop(&self) {
