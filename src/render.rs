@@ -851,8 +851,8 @@ unsafe extern "system" fn debug_callback(
 
 	// consider coloring off severity
 	eprintln!(
-		"validation layer type: {message_type:?} {message_severity:?} {message_id_name} {message_id} \
-			message: {message}"
+		"validation layer type: {message_type:?} {message_severity:?} {message_id_name} {message_id} \n\
+			message: {message}\n"
 	);
 
 	vk::FALSE
