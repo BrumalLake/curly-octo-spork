@@ -11,12 +11,7 @@ use ash::{
 	Device, Entry, Instance,
 	ext::debug_utils,
 	khr,
-	vk::{
-		self, API_VERSION_1_3, ApplicationInfo, DebugUtilsMessageSeverityFlagsEXT,
-		DebugUtilsMessageTypeFlagsEXT, DebugUtilsMessengerCreateInfoEXT, DebugUtilsMessengerEXT,
-		EXT_DEBUG_UTILS_NAME, GraphicsPipelineCreateInfo, Handle, InstanceCreateInfo,
-		PhysicalDevice, PhysicalDeviceType,
-	},
+	vk::{self, Handle},
 };
 use glfw::{
 	GLFW_CLIENT_API, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFWwindow, glfwCreateWindow,
@@ -40,8 +35,8 @@ pub struct TriangleApplication {
 	instance: Option<Instance>,
 	debug_instance: Option<debug_utils::Instance>,
 	surface_instance: Option<khr::surface::Instance>,
-	debug_messenger: DebugUtilsMessengerEXT,
-	physical_device: PhysicalDevice,
+	debug_messenger: vk::DebugUtilsMessengerEXT,
+	physical_device: vk::PhysicalDevice,
 	device: Option<Device>,
 	queue: Option<vk::Queue>,
 	surface: vk::SurfaceKHR,
@@ -96,12 +91,12 @@ impl TriangleApplication {
 	}
 
 	fn create_instance(&mut self) {
-		let application_info = ApplicationInfo::default()
+		let application_info = vk::ApplicationInfo::default()
 			.application_name(c"Hello Triangle")
 			.application_version(0)
 			.engine_name(c"No Engine")
 			.engine_version(1)
-			.api_version(API_VERSION_1_3);
+			.api_version(vk::API_VERSION_1_3);
 
 		// verify required layers
 		let mut required_layers: Vec<*const c_char> = vec![];
@@ -145,7 +140,7 @@ impl TriangleApplication {
 			);
 		}
 
-		let instance_create_info = InstanceCreateInfo::default()
+		let instance_create_info = vk::InstanceCreateInfo::default()
 			.enabled_extension_names(&required_instance_extensions)
 			.enabled_layer_names(&required_layers)
 			.application_info(&application_info);
@@ -173,7 +168,7 @@ impl TriangleApplication {
 		.collect();
 
 		if ENABLE_VALIDATION_LAYERS {
-			res.push(EXT_DEBUG_UTILS_NAME.as_ptr());
+			res.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr());
 		}
 
 		res
@@ -183,15 +178,15 @@ impl TriangleApplication {
 		let debug_instance =
 			debug_utils::Instance::new(&self.entry, self.instance.as_ref().unwrap());
 
-		let debug_messenger_info = DebugUtilsMessengerCreateInfoEXT::default()
+		let debug_messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
 			.message_severity(
-				DebugUtilsMessageSeverityFlagsEXT::WARNING
-					| DebugUtilsMessageSeverityFlagsEXT::ERROR,
+				vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+					| vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
 			)
 			.message_type(
-				DebugUtilsMessageTypeFlagsEXT::GENERAL
-					| DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
-					| DebugUtilsMessageTypeFlagsEXT::VALIDATION,
+				vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+					| vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
+					| vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION,
 			)
 			.pfn_user_callback(Some(debug_callback));
 
@@ -240,14 +235,14 @@ impl TriangleApplication {
 		self.physical_device = best_device.expect("no suitable GPU found");
 	}
 
-	fn score_device(&self, device: PhysicalDevice) -> Result<u8, ()> {
+	fn score_device(&self, device: vk::PhysicalDevice) -> Result<u8, ()> {
 		let mut score = 0;
 		let instance = self.instance.as_ref().unwrap();
 		let device_properties = unsafe { instance.get_physical_device_properties(device) };
 
 		// check if device is suitable
 		// supports vulkan api 1.3
-		if !(device_properties.api_version >= API_VERSION_1_3) {
+		if !(device_properties.api_version >= vk::API_VERSION_1_3) {
 			return Err(());
 		}
 
@@ -315,7 +310,7 @@ impl TriangleApplication {
 			return Err(());
 		}
 
-		if device_properties.device_type == PhysicalDeviceType::INTEGRATED_GPU {
+		if device_properties.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU {
 			score += 1;
 		}
 
@@ -611,7 +606,7 @@ impl TriangleApplication {
 		let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfo::default()
 			.color_attachment_formats(color_attachment_formats);
 
-		let create_infos = &[GraphicsPipelineCreateInfo::default()
+		let create_infos = &[vk::GraphicsPipelineCreateInfo::default()
 			.stages(stages)
 			.vertex_input_state(&vertex_input)
 			.input_assembly_state(&input_assembly)
@@ -913,8 +908,8 @@ impl Drop for TriangleApplication {
 }
 
 unsafe extern "system" fn debug_callback(
-	message_severity: DebugUtilsMessageSeverityFlagsEXT,
-	message_type: DebugUtilsMessageTypeFlagsEXT,
+	message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+	message_type: vk::DebugUtilsMessageTypeFlagsEXT,
 	p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
 	_user_data: *mut std::os::raw::c_void,
 ) -> vk::Bool32 {
