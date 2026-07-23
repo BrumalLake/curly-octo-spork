@@ -19,10 +19,10 @@ use ash::{
 	},
 };
 use glfw::{
-	GLFW_CLIENT_API, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFW_TRUE, GLFWwindow,
-	glfwCreateWindow, glfwCreateWindowSurface, glfwDestroyWindow, glfwGetFramebufferSize,
-	glfwGetRequiredInstanceExtensions, glfwInit, glfwPollEvents, glfwSetWindowShouldClose,
-	glfwTerminate, glfwWindowHint, glfwWindowShouldClose,
+	GLFW_CLIENT_API, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFWwindow, glfwCreateWindow,
+	glfwCreateWindowSurface, glfwDestroyWindow, glfwGetFramebufferSize,
+	glfwGetRequiredInstanceExtensions, glfwInit, glfwPollEvents, glfwTerminate, glfwWindowHint,
+	glfwWindowShouldClose,
 };
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
@@ -57,6 +57,9 @@ pub struct TriangleApplication {
 	pipeline: vk::Pipeline,
 	command_pool: vk::CommandPool,
 	command_buffer: vk::CommandBuffer,
+	present_complete_sem: vk::Semaphore,
+	render_complete_sem: vk::Semaphore,
+	draw_fence: vk::Fence,
 }
 
 impl TriangleApplication {
@@ -89,6 +92,7 @@ impl TriangleApplication {
 		self.create_graphics_pipeline();
 		self.create_command_pool();
 		self.create_command_buffer();
+		self.create_sync_objects();
 	}
 
 	fn create_instance(&mut self) {
@@ -305,6 +309,7 @@ impl TriangleApplication {
 			!(device_features.features.geometry_shader == vk::TRUE
 				&& vk11.shader_draw_parameters == vk::TRUE
 				&& vk13.dynamic_rendering == vk::TRUE
+				&& vk13.synchronization2 == vk::TRUE
 				&& extended_dynamic_state.extended_dynamic_state == vk::TRUE)
 		} {
 			return Err(());
@@ -349,7 +354,9 @@ impl TriangleApplication {
 			.queue_family_index(self.graphics_queue_index)];
 
 		let mut vk11 = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
-		let mut vk13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
+		let mut vk13 = vk::PhysicalDeviceVulkan13Features::default()
+			.dynamic_rendering(true)
+			.synchronization2(true);
 		let mut extended_dynamic_state =
 			vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT::default()
 				.extended_dynamic_state(true);
@@ -665,7 +672,7 @@ impl TriangleApplication {
 		.unwrap()[0];
 	}
 
-	fn record_command_buffer(&mut self, image_index: u32) {
+	fn record_command_buffer(&self, image_index: u32) {
 		let device = self.device.as_ref().unwrap();
 
 		unsafe {
@@ -705,6 +712,12 @@ impl TriangleApplication {
 		unsafe {
 			device.cmd_begin_rendering(self.command_buffer, &rendering_info);
 
+			device.cmd_bind_pipeline(
+				self.command_buffer,
+				vk::PipelineBindPoint::GRAPHICS,
+				self.pipeline,
+			);
+
 			device.cmd_set_viewport(
 				self.command_buffer,
 				0,
@@ -717,7 +730,6 @@ impl TriangleApplication {
 					max_depth: 0.0,
 				}],
 			);
-
 			device.cmd_set_scissor(
 				self.command_buffer,
 				0,
@@ -783,13 +795,80 @@ impl TriangleApplication {
 		};
 	}
 
+	fn create_sync_objects(&mut self) {
+		let device = self.device.as_ref().unwrap();
+		let sem_create_info = vk::SemaphoreCreateInfo::default();
+		unsafe {
+			self.present_complete_sem = device.create_semaphore(&sem_create_info, None).unwrap();
+			self.render_complete_sem = device.create_semaphore(&sem_create_info, None).unwrap();
+			self.draw_fence = device
+				.create_fence(
+					&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+					None,
+				)
+				.unwrap();
+		}
+	}
+
 	fn main_loop(&self) {
 		unsafe {
 			while glfwWindowShouldClose(self.window) == GLFW_FALSE {
-				// for cleanup testing as the window will not appear before a frame is submitted
-				glfwSetWindowShouldClose(self.window, GLFW_TRUE);
 				glfwPollEvents();
+				self.draw_frame();
 			}
+
+			self.device.as_ref().unwrap().device_wait_idle().unwrap();
+		}
+	}
+
+	fn draw_frame(&self) {
+		let device = self.device.as_ref().unwrap();
+		let device_swapchain_functions = self.device_swapchain_functions.as_ref().unwrap();
+
+		let fences = &[self.draw_fence];
+		unsafe {
+			device.wait_for_fences(fences, false, u64::MAX).unwrap();
+			device.reset_fences(fences).unwrap();
+		}
+
+		let (image_index, _) = unsafe {
+			device_swapchain_functions.acquire_next_image(
+				self.swapchain,
+				u64::MAX,
+				self.present_complete_sem,
+				vk::Fence::null(),
+			)
+		}
+		.unwrap();
+		self.record_command_buffer(image_index);
+
+		let wait_semaphores = &[self.present_complete_sem];
+		let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+		let signal_semaphores = &[self.render_complete_sem];
+		let command_buffers = &[self.command_buffer];
+		let submits = &[vk::SubmitInfo::default()
+			.wait_semaphores(wait_semaphores)
+			.wait_dst_stage_mask(wait_stages)
+			.signal_semaphores(signal_semaphores)
+			.command_buffers(command_buffers)];
+
+		unsafe {
+			device
+				.queue_submit(*self.queue.as_ref().unwrap(), submits, self.draw_fence)
+				.unwrap();
+		}
+
+		let wait_semaphores = &[self.render_complete_sem];
+		let swapchains = &[self.swapchain];
+		let image_indices = &[image_index];
+		let present_info = vk::PresentInfoKHR::default()
+			.wait_semaphores(wait_semaphores)
+			.swapchains(swapchains)
+			.image_indices(image_indices);
+		unsafe {
+			device_swapchain_functions
+				.queue_present(*self.queue.as_ref().unwrap(), &present_info)
+				.unwrap();
 		}
 	}
 }
@@ -798,6 +877,12 @@ impl Drop for TriangleApplication {
 	fn drop(&mut self) {
 		unsafe {
 			let device = self.device.as_ref().unwrap();
+			device.destroy_fence(self.draw_fence, None);
+			device.destroy_semaphore(self.present_complete_sem, None);
+			device.destroy_semaphore(self.render_complete_sem, None);
+			let command_buffer = &[self.command_buffer];
+			device.free_command_buffers(self.command_pool, command_buffer);
+			device.destroy_command_pool(self.command_pool, None);
 			device.destroy_pipeline(self.pipeline, None);
 			device.destroy_pipeline_layout(self.pipeline_layout, None);
 			device.destroy_shader_module(self.shader_module, None);
