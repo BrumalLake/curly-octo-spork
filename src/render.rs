@@ -26,6 +26,8 @@ const VALIDATION_LAYERS: &[&CStr] = &[c"VK_LAYER_KHRONOS_validation"];
 const WIDTH: i32 = 800;
 const HEIGHT: i32 = 600;
 
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
 #[derive(Default)]
 pub struct TriangleApplication {
 	window: *mut GLFWwindow,
@@ -51,10 +53,10 @@ pub struct TriangleApplication {
 	pipeline_layout: vk::PipelineLayout,
 	pipeline: vk::Pipeline,
 	command_pool: vk::CommandPool,
-	command_buffer: vk::CommandBuffer,
-	present_complete_sem: vk::Semaphore,
-	render_complete_sem: vk::Semaphore,
-	draw_fence: vk::Fence,
+	command_buffers: Vec<vk::CommandBuffer>,
+	present_complete_sems: Vec<vk::Semaphore>,
+	render_complete_sems: Vec<vk::Semaphore>,
+	draw_fences: Vec<vk::Fence>,
 }
 
 impl TriangleApplication {
@@ -86,7 +88,7 @@ impl TriangleApplication {
 		self.create_imageviews();
 		self.create_graphics_pipeline();
 		self.create_command_pool();
-		self.create_command_buffer();
+		self.create_command_buffers();
 		self.create_sync_objects();
 	}
 
@@ -652,26 +654,27 @@ impl TriangleApplication {
 		.unwrap();
 	}
 
-	fn create_command_buffer(&mut self) {
+	fn create_command_buffers(&mut self) {
 		let alloc_info = vk::CommandBufferAllocateInfo::default()
 			.command_pool(self.command_pool)
 			.level(vk::CommandBufferLevel::PRIMARY)
-			.command_buffer_count(1);
+			.command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32);
 
-		self.command_buffer = unsafe {
+		self.command_buffers = unsafe {
 			self.device
 				.as_ref()
 				.unwrap()
 				.allocate_command_buffers(&alloc_info)
 		}
-		.unwrap()[0];
+		.unwrap();
 	}
 
-	fn record_command_buffer(&self, image_index: u32) {
+	fn record_command_buffer(&self, image_index: u32, frame_index: usize) {
 		let device = self.device.as_ref().unwrap();
+		let command_buffer = self.command_buffers[frame_index];
 
 		unsafe {
-			device.begin_command_buffer(self.command_buffer, &vk::CommandBufferBeginInfo::default())
+			device.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())
 		}
 		.unwrap();
 
@@ -683,6 +686,7 @@ impl TriangleApplication {
 			vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
 			vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
 			image_index,
+			frame_index,
 		);
 
 		let color_attachments = &[vk::RenderingAttachmentInfo::default()
@@ -705,16 +709,16 @@ impl TriangleApplication {
 			.color_attachments(color_attachments);
 
 		unsafe {
-			device.cmd_begin_rendering(self.command_buffer, &rendering_info);
+			device.cmd_begin_rendering(command_buffer, &rendering_info);
 
 			device.cmd_bind_pipeline(
-				self.command_buffer,
+				command_buffer,
 				vk::PipelineBindPoint::GRAPHICS,
 				self.pipeline,
 			);
 
 			device.cmd_set_viewport(
-				self.command_buffer,
+				command_buffer,
 				0,
 				&[vk::Viewport {
 					x: 0.0,
@@ -726,7 +730,7 @@ impl TriangleApplication {
 				}],
 			);
 			device.cmd_set_scissor(
-				self.command_buffer,
+				command_buffer,
 				0,
 				&[vk::Rect2D {
 					offset: vk::Offset2D { x: 0, y: 0 },
@@ -734,9 +738,9 @@ impl TriangleApplication {
 				}],
 			);
 
-			device.cmd_draw(self.command_buffer, 3, 1, 0, 0);
+			device.cmd_draw(command_buffer, 3, 1, 0, 0);
 
-			device.cmd_end_rendering(self.command_buffer);
+			device.cmd_end_rendering(command_buffer);
 		}
 
 		self.transition_image_layout(
@@ -747,10 +751,11 @@ impl TriangleApplication {
 			vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
 			vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
 			image_index,
+			frame_index,
 		);
 
 		unsafe {
-			device.end_command_buffer(self.command_buffer).unwrap();
+			device.end_command_buffer(command_buffer).unwrap();
 		}
 	}
 
@@ -763,6 +768,7 @@ impl TriangleApplication {
 		src_stage_mask: vk::PipelineStageFlags2,
 		dst_stage_mask: vk::PipelineStageFlags2,
 		image_index: u32,
+		frame_index: usize,
 	) {
 		let barrier = &[vk::ImageMemoryBarrier2::default()
 			.old_layout(old_layout)
@@ -786,74 +792,96 @@ impl TriangleApplication {
 			self.device
 				.as_ref()
 				.unwrap()
-				.cmd_pipeline_barrier2(self.command_buffer, &dependency_info)
+				.cmd_pipeline_barrier2(self.command_buffers[frame_index], &dependency_info)
 		};
 	}
 
 	fn create_sync_objects(&mut self) {
 		let device = self.device.as_ref().unwrap();
 		let sem_create_info = vk::SemaphoreCreateInfo::default();
-		unsafe {
-			self.present_complete_sem = device.create_semaphore(&sem_create_info, None).unwrap();
-			self.render_complete_sem = device.create_semaphore(&sem_create_info, None).unwrap();
-			self.draw_fence = device
-				.create_fence(
-					&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
-					None,
-				)
-				.unwrap();
+		self.present_complete_sems
+			.reserve_exact(MAX_FRAMES_IN_FLIGHT);
+		self.render_complete_sems
+			.reserve_exact(self.swapchain_image.len());
+		self.draw_fences.reserve_exact(MAX_FRAMES_IN_FLIGHT);
+		for _ in 0..self.swapchain_image.len() {
+			unsafe {
+				self.render_complete_sems
+					.push(device.create_semaphore(&sem_create_info, None).unwrap());
+			}
+		}
+		for _ in 0..MAX_FRAMES_IN_FLIGHT {
+			unsafe {
+				self.present_complete_sems
+					.push(device.create_semaphore(&sem_create_info, None).unwrap());
+				self.draw_fences.push(
+					device
+						.create_fence(
+							&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+							None,
+						)
+						.unwrap(),
+				);
+			}
 		}
 	}
 
-	fn main_loop(&self) {
+	fn main_loop(&mut self) {
 		unsafe {
+			let mut frame_index = 0;
 			while glfwWindowShouldClose(self.window) == GLFW_FALSE {
 				glfwPollEvents();
-				self.draw_frame();
+				self.draw_frame(&mut frame_index);
 			}
 
 			self.device.as_ref().unwrap().device_wait_idle().unwrap();
 		}
 	}
 
-	fn draw_frame(&self) {
+	fn draw_frame(&mut self, frame_index: &mut usize) {
 		let device = self.device.as_ref().unwrap();
 		let device_swapchain_functions = self.device_swapchain_functions.as_ref().unwrap();
+		let command_buffer = &[self.command_buffers[*frame_index]];
+		let draw_fence = self.draw_fences[*frame_index];
+		let present_complete_sem = self.present_complete_sems[*frame_index];
+		let render_complete_sem;
 
-		let fences = &[self.draw_fence];
 		unsafe {
-			device.wait_for_fences(fences, false, u64::MAX).unwrap();
-			device.reset_fences(fences).unwrap();
+			device
+				.wait_for_fences(&[draw_fence], false, u64::MAX)
+				.unwrap();
+			device.reset_fences(&[draw_fence]).unwrap();
 		}
 
 		let (image_index, _) = unsafe {
 			device_swapchain_functions.acquire_next_image(
 				self.swapchain,
 				u64::MAX,
-				self.present_complete_sem,
+				present_complete_sem,
 				vk::Fence::null(),
 			)
 		}
 		.unwrap();
-		self.record_command_buffer(image_index);
+		self.record_command_buffer(image_index, *frame_index);
 
-		let wait_semaphores = &[self.present_complete_sem];
+		render_complete_sem = self.render_complete_sems[image_index as usize];
+
+		let wait_semaphores = &[present_complete_sem];
 		let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-		let signal_semaphores = &[self.render_complete_sem];
-		let command_buffers = &[self.command_buffer];
+		let signal_semaphores = &[render_complete_sem];
 		let submits = &[vk::SubmitInfo::default()
 			.wait_semaphores(wait_semaphores)
 			.wait_dst_stage_mask(wait_stages)
 			.signal_semaphores(signal_semaphores)
-			.command_buffers(command_buffers)];
+			.command_buffers(command_buffer)];
 
 		unsafe {
 			device
-				.queue_submit(*self.queue.as_ref().unwrap(), submits, self.draw_fence)
+				.queue_submit(*self.queue.as_ref().unwrap(), submits, draw_fence)
 				.unwrap();
 		}
 
-		let wait_semaphores = &[self.render_complete_sem];
+		let wait_semaphores = &[render_complete_sem];
 		let swapchains = &[self.swapchain];
 		let image_indices = &[image_index];
 		let present_info = vk::PresentInfoKHR::default()
@@ -865,6 +893,8 @@ impl TriangleApplication {
 				.queue_present(*self.queue.as_ref().unwrap(), &present_info)
 				.unwrap();
 		}
+
+		*frame_index = (*frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
 	}
 }
 
@@ -872,11 +902,14 @@ impl Drop for TriangleApplication {
 	fn drop(&mut self) {
 		unsafe {
 			let device = self.device.as_ref().unwrap();
-			device.destroy_fence(self.draw_fence, None);
-			device.destroy_semaphore(self.present_complete_sem, None);
-			device.destroy_semaphore(self.render_complete_sem, None);
-			let command_buffer = &[self.command_buffer];
-			device.free_command_buffers(self.command_pool, command_buffer);
+			for i in 0..self.render_complete_sems.len() {
+				device.destroy_semaphore(self.render_complete_sems[i], None);
+			}
+			for i in 0..MAX_FRAMES_IN_FLIGHT {
+				device.destroy_fence(self.draw_fences[i], None);
+				device.destroy_semaphore(self.present_complete_sems[i], None);
+			}
+			device.free_command_buffers(self.command_pool, &self.command_buffers);
 			device.destroy_command_pool(self.command_pool, None);
 			device.destroy_pipeline(self.pipeline, None);
 			device.destroy_pipeline_layout(self.pipeline_layout, None);
