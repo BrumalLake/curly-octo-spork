@@ -28,71 +28,112 @@ const HEIGHT: i32 = 600;
 
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
-#[derive(Default)]
 pub struct TriangleApplication {
 	window: *mut GLFWwindow,
 
-	// default is linked
 	entry: Entry,
-	instance: Option<Instance>,
-	debug_instance: Option<debug_utils::Instance>,
-	surface_instance: Option<khr::surface::Instance>,
+	instance: Instance,
+	debug_instance: debug_utils::Instance,
+	surface_instance: khr::surface::Instance,
 	debug_messenger: vk::DebugUtilsMessengerEXT,
 	physical_device: vk::PhysicalDevice,
-	device: Option<Device>,
-	queue: Option<vk::Queue>,
+	device: Device,
+	graphics_queue: vk::Queue,
 	surface: vk::SurfaceKHR,
-	device_swapchain_functions: Option<khr::swapchain::Device>,
+	device_swapchain_functions: khr::swapchain::Device,
 	swapchain: vk::SwapchainKHR,
 	graphics_queue_index: u32,
 	surface_format: vk::SurfaceFormatKHR,
 	extent: vk::Extent2D,
-	swapchain_image: Vec<vk::Image>,
-	image_views: Vec<vk::ImageView>,
+	swapchain_images: Vec<vk::Image>,
+	swapchain_image_views: Vec<vk::ImageView>,
 	shader_module: vk::ShaderModule,
 	pipeline_layout: vk::PipelineLayout,
 	pipeline: vk::Pipeline,
 	command_pool: vk::CommandPool,
 	command_buffers: Vec<vk::CommandBuffer>,
+	draw_fences: Vec<vk::Fence>,
 	present_complete_sems: Vec<vk::Semaphore>,
 	render_complete_sems: Vec<vk::Semaphore>,
-	draw_fences: Vec<vk::Fence>,
 }
 
 impl TriangleApplication {
-	pub fn render(mut self) {
-		self.init_window();
-		self.init_vulkan();
-		self.main_loop();
+	pub fn new() -> Self {
+		Self::default()
 	}
 
-	fn init_window(&mut self) {
+	pub fn render() {
+		let application = Self::new();
+		application.main_loop();
+	}
+
+	fn init_window() -> *mut GLFWwindow {
 		unsafe {
 			glfwInit();
 
 			glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 			glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
-			self.window =
-				glfwCreateWindow(WIDTH, HEIGHT, c"Vulkan".as_ptr(), null_mut(), null_mut());
+			glfwCreateWindow(WIDTH, HEIGHT, c"Vulkan".as_ptr(), null_mut(), null_mut())
 		}
 	}
 
-	fn init_vulkan(&mut self) {
-		self.create_instance();
-		self.setup_debug_messenger();
-		self.create_surface();
-		self.pick_physical_device();
-		self.create_logical_device();
-		self.create_swapchain();
-		self.create_imageviews();
-		self.create_graphics_pipeline();
-		self.create_command_pool();
-		self.create_command_buffers();
-		self.create_sync_objects();
+	fn init_vulkan(window: *mut GLFWwindow) -> Self {
+		let entry = Entry::linked();
+		let instance = Self::create_instance(&entry);
+		let (debug_messenger, debug_instance) = Self::setup_debug_messenger(&entry, &instance);
+		let surface = Self::create_surface(&instance, window);
+		let physical_device = Self::pick_physical_device(&instance);
+		let (device, graphics_queue, graphics_queue_index, surface_instance) =
+			Self::create_logical_device(&entry, &instance, physical_device, surface);
+		let (swapchain, swapchain_images, device_swapchain_functions, extent, surface_format) =
+			Self::create_swapchain(
+				&instance,
+				&surface_instance,
+				&device,
+				physical_device,
+				surface,
+				window,
+			);
+		let swapchain_image_views =
+			Self::create_imageviews(&device, surface_format, &swapchain_images);
+		let (pipeline, pipeline_layout, shader_module) =
+			Self::create_graphics_pipeline(&device, surface_format, extent);
+		let command_pool = Self::create_command_pool(&device, graphics_queue_index);
+		let command_buffers = Self::create_command_buffers(&device, command_pool);
+		let (draw_fences, present_complete_sems, render_complete_sems) =
+			Self::create_sync_objects(&device, &swapchain_images);
+
+		Self {
+			window,
+			entry,
+			instance,
+			debug_instance,
+			surface_instance,
+			debug_messenger,
+			physical_device,
+			device,
+			graphics_queue,
+			surface,
+			device_swapchain_functions,
+			swapchain,
+			graphics_queue_index,
+			surface_format,
+			extent,
+			swapchain_images,
+			swapchain_image_views,
+			shader_module,
+			pipeline_layout,
+			pipeline,
+			command_pool,
+			command_buffers,
+			draw_fences,
+			present_complete_sems,
+			render_complete_sems,
+		}
 	}
 
-	fn create_instance(&mut self) {
+	fn create_instance(entry: &Entry) -> Instance {
 		let application_info = vk::ApplicationInfo::default()
 			.application_name(c"Hello Triangle")
 			.application_version(0)
@@ -106,7 +147,7 @@ impl TriangleApplication {
 			required_layers.extend(VALIDATION_LAYERS.iter().map(|l| l.as_ptr()));
 		}
 
-		let layer_properties = unsafe { self.entry.enumerate_instance_layer_properties().unwrap() };
+		let layer_properties = unsafe { entry.enumerate_instance_layer_properties().unwrap() };
 
 		let layer_names: HashSet<_> = layer_properties
 			.iter()
@@ -123,11 +164,8 @@ impl TriangleApplication {
 		let required_instance_extensions = Self::required_instance_extensions();
 
 		// verify required extensions are all available
-		let extension_properties = unsafe {
-			self.entry
-				.enumerate_instance_extension_properties(None)
-				.unwrap()
-		};
+		let extension_properties =
+			unsafe { entry.enumerate_instance_extension_properties(None).unwrap() };
 
 		let extension_properties: HashSet<_> = extension_properties
 			.iter()
@@ -147,11 +185,7 @@ impl TriangleApplication {
 			.enabled_layer_names(&required_layers)
 			.application_info(&application_info);
 
-		self.instance = Some(unsafe {
-			self.entry
-				.create_instance(&instance_create_info, None)
-				.unwrap()
-		});
+		unsafe { entry.create_instance(&instance_create_info, None).unwrap() }
 	}
 
 	fn required_instance_extensions() -> Vec<*const c_char> {
@@ -176,9 +210,11 @@ impl TriangleApplication {
 		res
 	}
 
-	fn setup_debug_messenger(&mut self) {
-		let debug_instance =
-			debug_utils::Instance::new(&self.entry, self.instance.as_ref().unwrap());
+	fn setup_debug_messenger(
+		entry: &Entry,
+		instance: &Instance,
+	) -> (vk::DebugUtilsMessengerEXT, debug_utils::Instance) {
+		let debug_instance = debug_utils::Instance::new(entry, instance);
 
 		let debug_messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
 			.message_severity(
@@ -192,32 +228,33 @@ impl TriangleApplication {
 			)
 			.pfn_user_callback(Some(debug_callback));
 
-		self.debug_messenger =
+		(
 			unsafe { debug_instance.create_debug_utils_messenger(&debug_messenger_info, None) }
-				.unwrap();
-
-		self.debug_instance = Some(debug_instance);
+				.unwrap(),
+			debug_instance,
+		)
 	}
 
-	fn create_surface(&mut self) {
+	fn create_surface(instance: &Instance, window: *mut GLFWwindow) -> vk::SurfaceKHR {
+		let mut surface = vk::SurfaceKHR::null();
+
 		assert!(
 			unsafe {
 				glfwCreateWindowSurface(
-					std::ptr::without_provenance_mut(
-						self.instance.as_ref().unwrap().handle().as_raw() as usize,
-					),
-					self.window,
+					std::ptr::without_provenance_mut(instance.handle().as_raw() as usize),
+					window,
 					std::ptr::null(),
-					std::ptr::from_mut(&mut self.surface) as *mut _,
+					std::ptr::from_mut(&mut surface) as *mut _,
 				) == vk::Result::SUCCESS.as_raw()
 			},
 			"failed to create window surface"
 		);
+
+		surface
 	}
 
-	fn pick_physical_device(&mut self) {
-		let physical_devices =
-			unsafe { self.instance.as_ref().unwrap().enumerate_physical_devices() }.unwrap();
+	fn pick_physical_device(instance: &Instance) -> vk::PhysicalDevice {
+		let physical_devices = unsafe { instance.enumerate_physical_devices() }.unwrap();
 		assert!(
 			!physical_devices.is_empty(),
 			"failed to find GPU with Vulkan support"
@@ -226,7 +263,7 @@ impl TriangleApplication {
 		let (mut high_score, mut best_device) = (0, None);
 
 		for device in physical_devices {
-			if let Ok(score) = self.score_device(device)
+			if let Ok(score) = Self::score_device(instance, device)
 				&& score >= high_score
 			{
 				high_score = score;
@@ -234,12 +271,11 @@ impl TriangleApplication {
 			}
 		}
 
-		self.physical_device = best_device.expect("no suitable GPU found");
+		best_device.expect("no suitable GPU found")
 	}
 
-	fn score_device(&self, device: vk::PhysicalDevice) -> Result<u8, ()> {
+	fn score_device(instance: &Instance, device: vk::PhysicalDevice) -> Result<u8, ()> {
 		let mut score = 0;
-		let instance = self.instance.as_ref().unwrap();
 		let device_properties = unsafe { instance.get_physical_device_properties(device) };
 
 		// check if device is suitable
@@ -319,22 +355,27 @@ impl TriangleApplication {
 		Ok(score)
 	}
 
-	fn create_logical_device(&mut self) {
-		let instance = self.instance.as_ref().unwrap();
-		let surface_instance = khr::surface::Instance::new(&self.entry, instance);
+	fn create_logical_device(
+		entry: &Entry,
+		instance: &Instance,
+		physical_device: vk::PhysicalDevice,
+		surface: vk::SurfaceKHR,
+	) -> (Device, vk::Queue, u32, khr::surface::Instance) {
+		let surface_instance = khr::surface::Instance::new(entry, instance);
+		let graphics_queue_index;
 
 		let queue_family_properties =
-			unsafe { instance.get_physical_device_queue_family_properties(self.physical_device) };
-		self.graphics_queue_index = queue_family_properties
+			unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+		graphics_queue_index = queue_family_properties
 			.iter()
 			.enumerate()
 			.find(|(i, properties)| {
 				properties.queue_flags.contains(vk::QueueFlags::GRAPHICS)
 					&& unsafe {
 						surface_instance.get_physical_device_surface_support(
-							self.physical_device,
+							physical_device,
 							*i as u32,
-							self.surface,
+							surface,
 						)
 					}
 					.unwrap()
@@ -348,7 +389,7 @@ impl TriangleApplication {
 
 		let device_queue_infos = &[vk::DeviceQueueCreateInfo::default()
 			.queue_priorities(queue_priority)
-			.queue_family_index(self.graphics_queue_index)];
+			.queue_family_index(graphics_queue_index)];
 
 		let mut vk11 = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 		let mut vk13 = vk::PhysicalDeviceVulkan13Features::default()
@@ -375,42 +416,55 @@ impl TriangleApplication {
 
 		let device = unsafe {
 			instance
-				.create_device(self.physical_device, &device_create_info, None)
+				.create_device(physical_device, &device_create_info, None)
 				.unwrap()
 		};
 
-		self.queue = Some(unsafe { device.get_device_queue(self.graphics_queue_index, 0) });
+		let graphics_queue = unsafe { device.get_device_queue(graphics_queue_index, 0) };
 
-		self.surface_instance = Some(surface_instance);
-		self.device = Some(device);
+		(
+			device,
+			graphics_queue,
+			graphics_queue_index,
+			surface_instance,
+		)
 	}
 
-	fn create_swapchain(&mut self) {
-		let surface_instance = self.surface_instance.as_ref().unwrap();
-
+	fn create_swapchain(
+		instance: &Instance,
+		surface_instance: &khr::surface::Instance,
+		device: &Device,
+		physical_device: vk::PhysicalDevice,
+		surface: vk::SurfaceKHR,
+		window: *mut GLFWwindow,
+	) -> (
+		vk::SwapchainKHR,
+		Vec<vk::Image>,
+		khr::swapchain::Device,
+		vk::Extent2D,
+		vk::SurfaceFormatKHR,
+	) {
 		let surface_capabilities = unsafe {
-			surface_instance
-				.get_physical_device_surface_capabilities(self.physical_device, self.surface)
+			surface_instance.get_physical_device_surface_capabilities(physical_device, surface)
 		}
 		.unwrap();
-		let extent = self.choose_extent(&surface_capabilities);
+		let extent = Self::choose_extent(window, &surface_capabilities);
 		let min_image_count = Self::choose_min_image_count(&surface_capabilities);
 
 		let available_formats = unsafe {
-			surface_instance.get_physical_device_surface_formats(self.physical_device, self.surface)
+			surface_instance.get_physical_device_surface_formats(physical_device, surface)
 		}
 		.unwrap();
 		let surface_format = Self::choose_surface_format(&available_formats);
 
 		let available_presentmodes = unsafe {
-			surface_instance
-				.get_physical_device_surface_present_modes(self.physical_device, self.surface)
+			surface_instance.get_physical_device_surface_present_modes(physical_device, surface)
 		}
 		.unwrap();
 		let present_mode = Self::choose_present_mode(&available_presentmodes);
 
 		let create_info = vk::SwapchainCreateInfoKHR::default()
-			.surface(self.surface)
+			.surface(surface)
 			.min_image_count(min_image_count)
 			.image_format(surface_format.format)
 			.image_color_space(surface_format.color_space)
@@ -423,18 +477,20 @@ impl TriangleApplication {
 			.present_mode(present_mode)
 			.clipped(true);
 
-		let device_swapchain_functions = khr::swapchain::Device::new(
-			self.instance.as_ref().unwrap(),
-			self.device.as_ref().unwrap(),
-		);
+		let device_swapchain_functions = khr::swapchain::Device::new(instance, device);
 
-		self.swapchain =
+		let swapchain =
 			unsafe { device_swapchain_functions.create_swapchain(&create_info, None) }.unwrap();
-		self.swapchain_image =
-			unsafe { device_swapchain_functions.get_swapchain_images(self.swapchain) }.unwrap();
-		self.device_swapchain_functions = Some(device_swapchain_functions);
-		self.extent = extent;
-		self.surface_format = surface_format;
+		let swapchain_images =
+			unsafe { device_swapchain_functions.get_swapchain_images(swapchain) }.unwrap();
+
+		(
+			swapchain,
+			swapchain_images,
+			device_swapchain_functions,
+			extent,
+			surface_format,
+		)
 	}
 
 	fn choose_surface_format(available_formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
@@ -466,7 +522,10 @@ impl TriangleApplication {
 		}
 	}
 
-	fn choose_extent(&self, capabilities: &vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
+	fn choose_extent(
+		window: *mut GLFWwindow,
+		capabilities: &vk::SurfaceCapabilitiesKHR,
+	) -> vk::Extent2D {
 		if capabilities.current_extent.width != u32::MAX {
 			return capabilities.current_extent;
 		}
@@ -474,7 +533,7 @@ impl TriangleApplication {
 		let mut width = -1;
 		let mut height = -1;
 		unsafe {
-			glfwGetFramebufferSize(self.window, &mut width, &mut height);
+			glfwGetFramebufferSize(window, &mut width, &mut height);
 		}
 		let width: u32 = width.try_into().unwrap();
 		let height: u32 = height.try_into().unwrap();
@@ -503,10 +562,14 @@ impl TriangleApplication {
 		min_image_count
 	}
 
-	fn create_imageviews(&mut self) {
+	fn create_imageviews(
+		device: &Device,
+		surface_format: vk::SurfaceFormatKHR,
+		swapchain_images: &[vk::Image],
+	) -> Vec<vk::ImageView> {
 		let mut create_info = vk::ImageViewCreateInfo::default()
 			.view_type(vk::ImageViewType::TYPE_2D)
-			.format(self.surface_format.format)
+			.format(surface_format.format)
 			.subresource_range(vk::ImageSubresourceRange {
 				aspect_mask: vk::ImageAspectFlags::COLOR,
 				base_mip_level: 0,
@@ -515,18 +578,24 @@ impl TriangleApplication {
 				layer_count: 1,
 			});
 
-		self.image_views.reserve_exact(self.swapchain_image.len());
+		let mut image_views = Vec::new();
+		image_views.reserve_exact(swapchain_images.len());
 
-		let device = self.device.as_ref().unwrap();
-		for &image in self.swapchain_image.iter() {
+		for &image in swapchain_images {
 			create_info = create_info.image(image);
-			self.image_views
-				.push(unsafe { device.create_image_view(&create_info, None) }.unwrap());
+			image_views.push(unsafe { device.create_image_view(&create_info, None) }.unwrap());
 		}
+
+		image_views
 	}
 
-	fn create_graphics_pipeline(&mut self) {
-		let shader_module = self.create_shader_module(concat!(env!("OUT_DIR"), "/shader.spv"));
+	fn create_graphics_pipeline(
+		device: &Device,
+		surface_format: vk::SurfaceFormatKHR,
+		extent: vk::Extent2D,
+	) -> (vk::Pipeline, vk::PipelineLayout, vk::ShaderModule) {
+		let shader_module =
+			Self::create_shader_module(device, concat!(env!("OUT_DIR"), "/shader.spv"));
 
 		let vertex_stage_info = vk::PipelineShaderStageCreateInfo::default()
 			.stage(vk::ShaderStageFlags::VERTEX)
@@ -537,8 +606,6 @@ impl TriangleApplication {
 			.stage(vk::ShaderStageFlags::FRAGMENT)
 			.module(shader_module)
 			.name(c"fragment_main");
-
-		self.shader_module = shader_module;
 
 		let stages = &[vertex_stage_info, fragment_stage_info];
 
@@ -558,7 +625,7 @@ impl TriangleApplication {
 
 		let scissors = &[vk::Rect2D {
 			offset: vk::Offset2D { x: 0, y: 0 },
-			extent: self.extent,
+			extent: extent,
 		}];
 
 		let dynamic_states = &[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
@@ -595,15 +662,10 @@ impl TriangleApplication {
 			vk::PipelineColorBlendStateCreateInfo::default().attachments(color_blend_attachments);
 
 		let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
-		self.pipeline_layout = unsafe {
-			self.device
-				.as_ref()
-				.unwrap()
-				.create_pipeline_layout(&pipeline_layout_info, None)
-		}
-		.unwrap();
+		let pipeline_layout =
+			unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }.unwrap();
 
-		let color_attachment_formats = &[self.surface_format.format];
+		let color_attachment_formats = &[surface_format.format];
 
 		let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfo::default()
 			.color_attachment_formats(color_attachment_formats);
@@ -617,22 +679,18 @@ impl TriangleApplication {
 			.multisample_state(&multisampling)
 			.color_blend_state(&color_blend)
 			.dynamic_state(&dynamic_state_info)
-			.layout(self.pipeline_layout)
+			.layout(pipeline_layout)
 			.push_next(&mut pipeline_rendering_info)];
 
-		self.pipeline = unsafe {
-			self.device.as_ref().unwrap().create_graphics_pipelines(
-				vk::PipelineCache::null(),
-				create_infos,
-				None,
-			)
+		let pipeline = unsafe {
+			device.create_graphics_pipelines(vk::PipelineCache::null(), create_infos, None)
 		}
 		.unwrap()[0];
+
+		(pipeline, pipeline_layout, shader_module)
 	}
 
-	fn create_shader_module<P: AsRef<Path>>(&self, shader_path: P) -> vk::ShaderModule {
-		let device = self.device.as_ref().unwrap();
-
+	fn create_shader_module<P: AsRef<Path>>(device: &Device, shader_path: P) -> vk::ShaderModule {
 		let mut file = File::open(shader_path).unwrap();
 		let shader_code = ash::util::read_spv(&mut file).unwrap();
 
@@ -640,41 +698,32 @@ impl TriangleApplication {
 		unsafe { device.create_shader_module(&create_info, None) }.unwrap()
 	}
 
-	fn create_command_pool(&mut self) {
+	fn create_command_pool(device: &Device, graphics_queue_index: u32) -> vk::CommandPool {
 		let create_info = vk::CommandPoolCreateInfo::default()
 			.flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-			.queue_family_index(self.graphics_queue_index);
+			.queue_family_index(graphics_queue_index);
 
-		self.command_pool = unsafe {
-			self.device
-				.as_ref()
-				.unwrap()
-				.create_command_pool(&create_info, None)
-		}
-		.unwrap();
+		unsafe { device.create_command_pool(&create_info, None) }.unwrap()
 	}
 
-	fn create_command_buffers(&mut self) {
+	fn create_command_buffers(
+		device: &Device,
+		command_pool: vk::CommandPool,
+	) -> Vec<vk::CommandBuffer> {
 		let alloc_info = vk::CommandBufferAllocateInfo::default()
-			.command_pool(self.command_pool)
+			.command_pool(command_pool)
 			.level(vk::CommandBufferLevel::PRIMARY)
 			.command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32);
 
-		self.command_buffers = unsafe {
-			self.device
-				.as_ref()
-				.unwrap()
-				.allocate_command_buffers(&alloc_info)
-		}
-		.unwrap();
+		unsafe { device.allocate_command_buffers(&alloc_info) }.unwrap()
 	}
 
 	fn record_command_buffer(&self, image_index: u32, frame_index: usize) {
-		let device = self.device.as_ref().unwrap();
 		let command_buffer = self.command_buffers[frame_index];
 
 		unsafe {
-			device.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())
+			self.device
+				.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())
 		}
 		.unwrap();
 
@@ -690,7 +739,7 @@ impl TriangleApplication {
 		);
 
 		let color_attachments = &[vk::RenderingAttachmentInfo::default()
-			.image_view(self.image_views[image_index as usize])
+			.image_view(self.swapchain_image_views[image_index as usize])
 			.image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
 			.load_op(vk::AttachmentLoadOp::CLEAR)
 			.store_op(vk::AttachmentStoreOp::STORE)
@@ -709,15 +758,16 @@ impl TriangleApplication {
 			.color_attachments(color_attachments);
 
 		unsafe {
-			device.cmd_begin_rendering(command_buffer, &rendering_info);
+			self.device
+				.cmd_begin_rendering(command_buffer, &rendering_info);
 
-			device.cmd_bind_pipeline(
+			self.device.cmd_bind_pipeline(
 				command_buffer,
 				vk::PipelineBindPoint::GRAPHICS,
 				self.pipeline,
 			);
 
-			device.cmd_set_viewport(
+			self.device.cmd_set_viewport(
 				command_buffer,
 				0,
 				&[vk::Viewport {
@@ -729,7 +779,7 @@ impl TriangleApplication {
 					max_depth: 0.0,
 				}],
 			);
-			device.cmd_set_scissor(
+			self.device.cmd_set_scissor(
 				command_buffer,
 				0,
 				&[vk::Rect2D {
@@ -738,9 +788,9 @@ impl TriangleApplication {
 				}],
 			);
 
-			device.cmd_draw(command_buffer, 3, 1, 0, 0);
+			self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
 
-			device.cmd_end_rendering(command_buffer);
+			self.device.cmd_end_rendering(command_buffer);
 		}
 
 		self.transition_image_layout(
@@ -755,7 +805,7 @@ impl TriangleApplication {
 		);
 
 		unsafe {
-			device.end_command_buffer(command_buffer).unwrap();
+			self.device.end_command_buffer(command_buffer).unwrap();
 		}
 	}
 
@@ -777,7 +827,7 @@ impl TriangleApplication {
 			.dst_access_mask(dst_access_mask)
 			.src_stage_mask(src_stage_mask)
 			.dst_stage_mask(dst_stage_mask)
-			.image(self.swapchain_image[image_index as usize])
+			.image(self.swapchain_images[image_index as usize])
 			.subresource_range(vk::ImageSubresourceRange {
 				aspect_mask: vk::ImageAspectFlags::COLOR,
 				base_mip_level: 0,
@@ -790,31 +840,32 @@ impl TriangleApplication {
 
 		unsafe {
 			self.device
-				.as_ref()
-				.unwrap()
 				.cmd_pipeline_barrier2(self.command_buffers[frame_index], &dependency_info)
 		};
 	}
 
-	fn create_sync_objects(&mut self) {
-		let device = self.device.as_ref().unwrap();
+	fn create_sync_objects(
+		device: &Device,
+		swapchain_images: &[vk::Image],
+	) -> (Vec<vk::Fence>, Vec<vk::Semaphore>, Vec<vk::Semaphore>) {
+		let mut present_complete_sems = Vec::new();
+		present_complete_sems.reserve_exact(MAX_FRAMES_IN_FLIGHT);
+		let mut render_complete_sems = Vec::new();
+		render_complete_sems.reserve_exact(swapchain_images.len());
+		let mut draw_fences = Vec::new();
+		draw_fences.reserve_exact(MAX_FRAMES_IN_FLIGHT);
+
 		let sem_create_info = vk::SemaphoreCreateInfo::default();
-		self.present_complete_sems
-			.reserve_exact(MAX_FRAMES_IN_FLIGHT);
-		self.render_complete_sems
-			.reserve_exact(self.swapchain_image.len());
-		self.draw_fences.reserve_exact(MAX_FRAMES_IN_FLIGHT);
-		for _ in 0..self.swapchain_image.len() {
+		for _ in 0..swapchain_images.len() {
 			unsafe {
-				self.render_complete_sems
-					.push(device.create_semaphore(&sem_create_info, None).unwrap());
+				render_complete_sems.push(device.create_semaphore(&sem_create_info, None).unwrap());
 			}
 		}
 		for _ in 0..MAX_FRAMES_IN_FLIGHT {
 			unsafe {
-				self.present_complete_sems
+				present_complete_sems
 					.push(device.create_semaphore(&sem_create_info, None).unwrap());
-				self.draw_fences.push(
+				draw_fences.push(
 					device
 						.create_fence(
 							&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
@@ -824,9 +875,11 @@ impl TriangleApplication {
 				);
 			}
 		}
+
+		(draw_fences, present_complete_sems, render_complete_sems)
 	}
 
-	fn main_loop(&mut self) {
+	fn main_loop(&self) {
 		unsafe {
 			let mut frame_index = 0;
 			while glfwWindowShouldClose(self.window) == GLFW_FALSE {
@@ -834,27 +887,25 @@ impl TriangleApplication {
 				self.draw_frame(&mut frame_index);
 			}
 
-			self.device.as_ref().unwrap().device_wait_idle().unwrap();
+			self.device.device_wait_idle().unwrap();
 		}
 	}
 
-	fn draw_frame(&mut self, frame_index: &mut usize) {
-		let device = self.device.as_ref().unwrap();
-		let device_swapchain_functions = self.device_swapchain_functions.as_ref().unwrap();
+	fn draw_frame(&self, frame_index: &mut usize) {
 		let command_buffer = &[self.command_buffers[*frame_index]];
 		let draw_fence = self.draw_fences[*frame_index];
 		let present_complete_sem = self.present_complete_sems[*frame_index];
 		let render_complete_sem;
 
 		unsafe {
-			device
+			self.device
 				.wait_for_fences(&[draw_fence], false, u64::MAX)
 				.unwrap();
-			device.reset_fences(&[draw_fence]).unwrap();
+			self.device.reset_fences(&[draw_fence]).unwrap();
 		}
 
 		let (image_index, _) = unsafe {
-			device_swapchain_functions.acquire_next_image(
+			self.device_swapchain_functions.acquire_next_image(
 				self.swapchain,
 				u64::MAX,
 				present_complete_sem,
@@ -876,8 +927,8 @@ impl TriangleApplication {
 			.command_buffers(command_buffer)];
 
 		unsafe {
-			device
-				.queue_submit(*self.queue.as_ref().unwrap(), submits, draw_fence)
+			self.device
+				.queue_submit(self.graphics_queue, submits, draw_fence)
 				.unwrap();
 		}
 
@@ -889,8 +940,8 @@ impl TriangleApplication {
 			.swapchains(swapchains)
 			.image_indices(image_indices);
 		unsafe {
-			device_swapchain_functions
-				.queue_present(*self.queue.as_ref().unwrap(), &present_info)
+			self.device_swapchain_functions
+				.queue_present(self.graphics_queue, &present_info)
 				.unwrap();
 		}
 
@@ -898,39 +949,42 @@ impl TriangleApplication {
 	}
 }
 
+impl Default for TriangleApplication {
+	fn default() -> Self {
+		let window = Self::init_window();
+		Self::init_vulkan(window)
+	}
+}
+
 impl Drop for TriangleApplication {
 	fn drop(&mut self) {
 		unsafe {
-			let device = self.device.as_ref().unwrap();
 			for i in 0..self.render_complete_sems.len() {
-				device.destroy_semaphore(self.render_complete_sems[i], None);
+				self.device
+					.destroy_semaphore(self.render_complete_sems[i], None);
 			}
 			for i in 0..MAX_FRAMES_IN_FLIGHT {
-				device.destroy_fence(self.draw_fences[i], None);
-				device.destroy_semaphore(self.present_complete_sems[i], None);
+				self.device.destroy_fence(self.draw_fences[i], None);
+				self.device
+					.destroy_semaphore(self.present_complete_sems[i], None);
 			}
-			device.free_command_buffers(self.command_pool, &self.command_buffers);
-			device.destroy_command_pool(self.command_pool, None);
-			device.destroy_pipeline(self.pipeline, None);
-			device.destroy_pipeline_layout(self.pipeline_layout, None);
-			device.destroy_shader_module(self.shader_module, None);
-			for &imageview in self.image_views.iter() {
-				device.destroy_image_view(imageview, None);
+			self.device
+				.free_command_buffers(self.command_pool, &self.command_buffers);
+			self.device.destroy_command_pool(self.command_pool, None);
+			self.device.destroy_pipeline(self.pipeline, None);
+			self.device
+				.destroy_pipeline_layout(self.pipeline_layout, None);
+			self.device.destroy_shader_module(self.shader_module, None);
+			for &imageview in self.swapchain_image_views.iter() {
+				self.device.destroy_image_view(imageview, None);
 			}
 			self.device_swapchain_functions
-				.as_ref()
-				.unwrap()
 				.destroy_swapchain(self.swapchain, None);
-			self.surface_instance
-				.as_ref()
-				.unwrap()
-				.destroy_surface(self.surface, None);
+			self.surface_instance.destroy_surface(self.surface, None);
 			self.debug_instance
-				.as_ref()
-				.unwrap()
 				.destroy_debug_utils_messenger(self.debug_messenger, None);
-			device.destroy_device(None);
-			self.instance.as_ref().unwrap().destroy_instance(None);
+			self.device.destroy_device(None);
+			self.instance.destroy_instance(None);
 		}
 
 		unsafe {
