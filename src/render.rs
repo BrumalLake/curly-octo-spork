@@ -959,14 +959,14 @@ impl Default for TriangleApplication {
 impl Drop for TriangleApplication {
 	fn drop(&mut self) {
 		unsafe {
-			for i in 0..self.render_complete_sems.len() {
-				self.device
-					.destroy_semaphore(self.render_complete_sems[i], None);
+			for &sem in self.render_complete_sems.iter() {
+				self.device.destroy_semaphore(sem, None);
 			}
-			for i in 0..MAX_FRAMES_IN_FLIGHT {
-				self.device.destroy_fence(self.draw_fences[i], None);
-				self.device
-					.destroy_semaphore(self.present_complete_sems[i], None);
+			for &sem in self.present_complete_sems.iter() {
+				self.device.destroy_semaphore(sem, None);
+			}
+			for &fence in self.draw_fences.iter() {
+				self.device.destroy_fence(fence, None);
 			}
 			self.device
 				.free_command_buffers(self.command_pool, &self.command_buffers);
