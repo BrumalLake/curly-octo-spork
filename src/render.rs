@@ -16,8 +16,9 @@ use ash::{
 use glfw::{
 	GLFW_CLIENT_API, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFWwindow, glfwCreateWindow,
 	glfwCreateWindowSurface, glfwDestroyWindow, glfwGetFramebufferSize,
-	glfwGetRequiredInstanceExtensions, glfwInit, glfwPollEvents, glfwTerminate, glfwWindowHint,
-	glfwWindowShouldClose,
+	glfwGetRequiredInstanceExtensions, glfwGetWindowUserPointer, glfwInit, glfwPollEvents,
+	glfwSetFramebufferSizeCallback, glfwSetWindowUserPointer, glfwTerminate, glfwWaitEvents,
+	glfwWindowHint, glfwWindowShouldClose,
 };
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
@@ -55,6 +56,9 @@ pub struct TriangleApplication {
 	draw_fences: Vec<vk::Fence>,
 	present_complete_sems: Vec<vk::Semaphore>,
 	render_complete_sems: Vec<vk::Semaphore>,
+	// must be on the heap because stack addresses are not consistent with FFI
+	// modified in glfw callback
+	framebuffer_resized: Box<bool>,
 }
 
 impl TriangleApplication {
@@ -63,7 +67,7 @@ impl TriangleApplication {
 	}
 
 	pub fn render() {
-		let application = Self::new();
+		let mut application = Self::new();
 		application.main_loop();
 	}
 
@@ -72,9 +76,11 @@ impl TriangleApplication {
 			glfwInit();
 
 			glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-			glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
-			glfwCreateWindow(WIDTH, HEIGHT, c"Vulkan".as_ptr(), null_mut(), null_mut())
+			let window =
+				glfwCreateWindow(WIDTH, HEIGHT, c"Vulkan".as_ptr(), null_mut(), null_mut());
+
+			window
 		}
 	}
 
@@ -130,6 +136,7 @@ impl TriangleApplication {
 			draw_fences,
 			present_complete_sems,
 			render_complete_sems,
+			framebuffer_resized: Box::new(false),
 		}
 	}
 
@@ -879,7 +886,7 @@ impl TriangleApplication {
 		(draw_fences, present_complete_sems, render_complete_sems)
 	}
 
-	fn main_loop(&self) {
+	fn main_loop(&mut self) {
 		unsafe {
 			let mut frame_index = 0;
 			while glfwWindowShouldClose(self.window) == GLFW_FALSE {
@@ -891,28 +898,40 @@ impl TriangleApplication {
 		}
 	}
 
-	fn draw_frame(&self, frame_index: &mut usize) {
+	fn draw_frame(&mut self, frame_index: &mut usize) {
 		let command_buffer = &[self.command_buffers[*frame_index]];
 		let draw_fence = self.draw_fences[*frame_index];
 		let present_complete_sem = self.present_complete_sems[*frame_index];
+		// per image, so requires the image index to be acquired from swapchain
 		let render_complete_sem;
 
 		unsafe {
 			self.device
 				.wait_for_fences(&[draw_fence], false, u64::MAX)
 				.unwrap();
-			self.device.reset_fences(&[draw_fence]).unwrap();
 		}
 
-		let (image_index, _) = unsafe {
+		let (image_index, _) = match unsafe {
 			self.device_swapchain_functions.acquire_next_image(
 				self.swapchain,
 				u64::MAX,
 				present_complete_sem,
 				vk::Fence::null(),
 			)
+		} {
+			Ok(res) => res,
+			Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+				*self.framebuffer_resized = false;
+				self.recreate_swapchain();
+				return;
+			}
+			Err(e) => panic!("{e:?}"),
+		};
+
+		unsafe {
+			self.device.reset_fences(&[draw_fence]).unwrap();
 		}
-		.unwrap();
+
 		self.record_command_buffer(image_index, *frame_index);
 
 		render_complete_sem = self.render_complete_sems[image_index as usize];
@@ -939,20 +958,69 @@ impl TriangleApplication {
 			.wait_semaphores(wait_semaphores)
 			.swapchains(swapchains)
 			.image_indices(image_indices);
-		unsafe {
+		match unsafe {
 			self.device_swapchain_functions
 				.queue_present(self.graphics_queue, &present_info)
-				.unwrap();
+		} {
+			Ok(false) if !*self.framebuffer_resized => (),
+			Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+				*self.framebuffer_resized = false;
+				self.recreate_swapchain();
+			}
+			Err(e) => panic!("{e:?}"),
 		}
 
 		*frame_index = (*frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
+	}
+
+	fn recreate_swapchain(&mut self) {
+		unsafe {
+			self.device.device_wait_idle().unwrap();
+
+			for &view in self.swapchain_image_views.iter() {
+				self.device.destroy_image_view(view, None);
+			}
+			self.device_swapchain_functions
+				.destroy_swapchain(self.swapchain, None);
+		}
+
+		(
+			self.swapchain,
+			self.swapchain_images,
+			self.device_swapchain_functions,
+			self.extent,
+			self.surface_format,
+		) = Self::create_swapchain(
+			&self.instance,
+			&self.surface_instance,
+			&self.device,
+			self.physical_device,
+			self.surface,
+			self.window,
+		);
+
+		self.swapchain_image_views =
+			Self::create_imageviews(&self.device, self.surface_format, &self.swapchain_images);
+	}
+
+	fn set_resize_callback(&mut self) {
+		unsafe {
+			glfwSetWindowUserPointer(
+				self.window,
+				&mut *self.framebuffer_resized as *mut bool as *mut _,
+			);
+			glfwSetFramebufferSizeCallback(self.window, Some(resize_callback));
+		}
 	}
 }
 
 impl Default for TriangleApplication {
 	fn default() -> Self {
 		let window = Self::init_window();
-		Self::init_vulkan(window)
+		let mut application = Self::init_vulkan(window);
+		application.set_resize_callback();
+
+		application
 	}
 }
 
@@ -1023,4 +1091,16 @@ unsafe extern "system" fn debug_callback(
 	);
 
 	vk::FALSE
+}
+
+unsafe extern "C" fn resize_callback(
+	window: *mut GLFWwindow,
+	_width: std::ffi::c_int,
+	_height: std::ffi::c_int,
+) {
+	let framebuffer_resized = unsafe { glfwGetWindowUserPointer(window) as *mut bool };
+	// unsafe { (glfwGetWindowUserPointer(window) as *mut TriangleApplication).as_mut() }.unwrap();
+	unsafe {
+		*framebuffer_resized = true;
+	}
 }
