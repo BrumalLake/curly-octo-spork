@@ -14,11 +14,11 @@ use ash::{
 	vk::{self, Handle},
 };
 use glfw::{
-	GLFW_CLIENT_API, GLFW_DECORATED, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFW_TRUE,
-	GLFWwindow, glfwCreateWindow, glfwCreateWindowSurface, glfwDestroyWindow,
-	glfwGetFramebufferSize, glfwGetRequiredInstanceExtensions, glfwGetWindowUserPointer, glfwInit,
-	glfwPollEvents, glfwSetFramebufferSizeCallback, glfwSetWindowUserPointer, glfwTerminate,
-	glfwWaitEvents, glfwWindowHint, glfwWindowShouldClose,
+	GLFW_CLIENT_API, GLFW_FALSE, GLFW_NO_API, GLFWwindow, glfwCreateWindow,
+	glfwCreateWindowSurface, glfwDestroyWindow, glfwGetFramebufferSize,
+	glfwGetRequiredInstanceExtensions, glfwGetWindowUserPointer, glfwInit, glfwPollEvents,
+	glfwSetFramebufferSizeCallback, glfwSetWindowUserPointer, glfwTerminate, glfwWaitEvents,
+	glfwWindowHint, glfwWindowShouldClose,
 };
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
@@ -658,12 +658,7 @@ impl TriangleApplication {
 
 		let color_blend_attachments = &[vk::PipelineColorBlendAttachmentState::default()
 			.blend_enable(false)
-			.color_write_mask(
-				vk::ColorComponentFlags::R
-					| vk::ColorComponentFlags::G
-					| vk::ColorComponentFlags::G
-					| vk::ColorComponentFlags::A,
-			)];
+			.color_write_mask(vk::ColorComponentFlags::RGBA)];
 
 		let color_blend =
 			vk::PipelineColorBlendStateCreateInfo::default().attachments(color_blend_attachments);
