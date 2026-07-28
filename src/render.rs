@@ -14,11 +14,11 @@ use ash::{
 	vk::{self, Handle},
 };
 use glfw::{
-	GLFW_CLIENT_API, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFWwindow, glfwCreateWindow,
-	glfwCreateWindowSurface, glfwDestroyWindow, glfwGetFramebufferSize,
-	glfwGetRequiredInstanceExtensions, glfwGetWindowUserPointer, glfwInit, glfwPollEvents,
-	glfwSetFramebufferSizeCallback, glfwSetWindowUserPointer, glfwTerminate, glfwWaitEvents,
-	glfwWindowHint, glfwWindowShouldClose,
+	GLFW_CLIENT_API, GLFW_DECORATED, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFW_TRUE,
+	GLFWwindow, glfwCreateWindow, glfwCreateWindowSurface, glfwDestroyWindow,
+	glfwGetFramebufferSize, glfwGetRequiredInstanceExtensions, glfwGetWindowUserPointer, glfwInit,
+	glfwPollEvents, glfwSetFramebufferSizeCallback, glfwSetWindowUserPointer, glfwTerminate,
+	glfwWaitEvents, glfwWindowHint, glfwWindowShouldClose,
 };
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
@@ -976,6 +976,17 @@ impl TriangleApplication {
 	fn recreate_swapchain(&mut self) {
 		unsafe {
 			self.device.device_wait_idle().unwrap();
+
+			let (mut width, mut height) = (0, 0);
+			loop {
+				glfwGetFramebufferSize(self.window, &mut width, &mut height);
+				if width == 0 || height == 0 {
+					glfwWaitEvents();
+					continue;
+				}
+
+				break;
+			}
 
 			for &view in self.swapchain_image_views.iter() {
 				self.device.destroy_image_view(view, None);
