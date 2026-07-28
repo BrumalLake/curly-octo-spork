@@ -16,9 +16,10 @@ use ash::{
 use glfw::{
 	GLFW_CLIENT_API, GLFW_DECORATED, GLFW_FALSE, GLFW_NO_API, GLFW_RESIZABLE, GLFW_TRUE,
 	GLFWwindow, glfwCreateWindow, glfwCreateWindowSurface, glfwDestroyWindow,
-	glfwGetFramebufferSize, glfwGetRequiredInstanceExtensions, glfwGetWindowUserPointer, glfwInit,
-	glfwPollEvents, glfwSetFramebufferSizeCallback, glfwSetWindowUserPointer, glfwTerminate,
-	glfwWaitEvents, glfwWindowHint, glfwWindowShouldClose,
+	glfwGetFramebufferSize, glfwGetRequiredInstanceExtensions, glfwGetWindowUserPointer,
+	glfwIconifyWindow, glfwInit, glfwPollEvents, glfwSetFramebufferSizeCallback,
+	glfwSetWindowIconifyCallback, glfwSetWindowUserPointer, glfwTerminate, glfwWaitEvents,
+	glfwWindowHint, glfwWindowShouldClose,
 };
 
 const ENABLE_VALIDATION_LAYERS: bool = cfg!(debug_assertions);
@@ -58,7 +59,12 @@ pub struct TriangleApplication {
 	render_complete_sems: Vec<vk::Semaphore>,
 	// must be on the heap because stack addresses are not consistent with FFI
 	// modified in glfw callback
-	framebuffer_resized: Box<bool>,
+	callback: Box<CallbackVars>,
+}
+
+struct CallbackVars {
+	framebuffer_resized: bool,
+	minimized: bool,
 }
 
 impl TriangleApplication {
@@ -136,7 +142,10 @@ impl TriangleApplication {
 			draw_fences,
 			present_complete_sems,
 			render_complete_sems,
-			framebuffer_resized: Box::new(false),
+			callback: Box::new(CallbackVars {
+				framebuffer_resized: false,
+				minimized: false,
+			}),
 		}
 	}
 
@@ -889,6 +898,7 @@ impl TriangleApplication {
 	fn main_loop(&mut self) {
 		unsafe {
 			let mut frame_index = 0;
+			glfwIconifyWindow(self.window);
 			while glfwWindowShouldClose(self.window) == GLFW_FALSE {
 				glfwPollEvents();
 				self.draw_frame(&mut frame_index);
@@ -921,7 +931,7 @@ impl TriangleApplication {
 		} {
 			Ok(res) => res,
 			Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-				*self.framebuffer_resized = false;
+				(*self.callback).framebuffer_resized = false;
 				self.recreate_swapchain();
 				return;
 			}
@@ -962,9 +972,9 @@ impl TriangleApplication {
 			self.device_swapchain_functions
 				.queue_present(self.graphics_queue, &present_info)
 		} {
-			Ok(false) if !*self.framebuffer_resized => (),
+			Ok(false) if !(*self.callback).framebuffer_resized && !(*self.callback).minimized => (),
 			Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-				*self.framebuffer_resized = false;
+				(*self.callback).framebuffer_resized = false;
 				self.recreate_swapchain();
 			}
 			Err(e) => panic!("{e:?}"),
@@ -980,7 +990,7 @@ impl TriangleApplication {
 			let (mut width, mut height) = (0, 0);
 			loop {
 				glfwGetFramebufferSize(self.window, &mut width, &mut height);
-				if width == 0 || height == 0 {
+				if (*self.callback).minimized || width == 0 || height == 0 {
 					glfwWaitEvents();
 					continue;
 				}
@@ -1014,13 +1024,26 @@ impl TriangleApplication {
 			Self::create_imageviews(&self.device, self.surface_format, &self.swapchain_images);
 	}
 
-	fn set_resize_callback(&mut self) {
+	fn set_window_callbacks(&mut self) {
 		unsafe {
 			glfwSetWindowUserPointer(
 				self.window,
-				&mut *self.framebuffer_resized as *mut bool as *mut _,
+				std::ptr::from_mut(&mut *self.callback) as *mut _,
 			);
+		}
+		self.set_resize_callback();
+		self.set_minimize_callback();
+	}
+
+	fn set_resize_callback(&mut self) {
+		unsafe {
 			glfwSetFramebufferSizeCallback(self.window, Some(resize_callback));
+		}
+	}
+
+	fn set_minimize_callback(&mut self) {
+		unsafe {
+			glfwSetWindowIconifyCallback(self.window, Some(iconify_callback));
 		}
 	}
 }
@@ -1029,7 +1052,7 @@ impl Default for TriangleApplication {
 	fn default() -> Self {
 		let window = Self::init_window();
 		let mut application = Self::init_vulkan(window);
-		application.set_resize_callback();
+		application.set_window_callbacks();
 
 		application
 	}
@@ -1109,9 +1132,15 @@ unsafe extern "C" fn resize_callback(
 	_width: std::ffi::c_int,
 	_height: std::ffi::c_int,
 ) {
-	let framebuffer_resized = unsafe { glfwGetWindowUserPointer(window) as *mut bool };
-	// unsafe { (glfwGetWindowUserPointer(window) as *mut TriangleApplication).as_mut() }.unwrap();
+	let callback_vars = unsafe { glfwGetWindowUserPointer(window) as *mut CallbackVars };
 	unsafe {
-		*framebuffer_resized = true;
+		(*callback_vars).framebuffer_resized = true;
+	}
+}
+
+unsafe extern "C" fn iconify_callback(window: *mut GLFWwindow, iconified: ::std::os::raw::c_int) {
+	let callback_vars = unsafe { glfwGetWindowUserPointer(window) as *mut CallbackVars };
+	unsafe {
+		(*callback_vars).minimized = iconified != 0;
 	}
 }
