@@ -1,4 +1,5 @@
 use std::{
+	array,
 	borrow::Cow,
 	collections::HashSet,
 	ffi::{CStr, c_char},
@@ -667,7 +668,7 @@ impl TriangleApplication {
 		let pipeline_layout =
 			unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }.unwrap();
 
-		let color_attachment_formats = &[surface_format.format];
+		let color_attachment_formats = array::from_ref(&surface_format.format);
 
 		let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfo::default()
 			.color_attachment_formats(color_attachment_formats);
@@ -894,7 +895,7 @@ impl TriangleApplication {
 	}
 
 	fn draw_frame(&mut self, frame_index: &mut usize) {
-		let command_buffer = &[self.command_buffers[*frame_index]];
+		let command_buffer = array::from_ref(&self.command_buffers[*frame_index]);
 		let draw_fence = self.draw_fences[*frame_index];
 		let present_complete_sem = self.present_complete_sems[*frame_index];
 		// per image, so requires the image index to be acquired from swapchain
@@ -902,7 +903,7 @@ impl TriangleApplication {
 
 		unsafe {
 			self.device
-				.wait_for_fences(&[draw_fence], false, u64::MAX)
+				.wait_for_fences(array::from_ref(&draw_fence), false, u64::MAX)
 				.unwrap();
 		}
 
@@ -924,16 +925,18 @@ impl TriangleApplication {
 		};
 
 		unsafe {
-			self.device.reset_fences(&[draw_fence]).unwrap();
+			self.device
+				.reset_fences(array::from_ref(&draw_fence))
+				.unwrap();
 		}
 
 		self.record_command_buffer(image_index, *frame_index);
 
 		render_complete_sem = self.render_complete_sems[image_index as usize];
 
-		let wait_semaphores = &[present_complete_sem];
+		let wait_semaphores = array::from_ref(&present_complete_sem);
 		let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-		let signal_semaphores = &[render_complete_sem];
+		let signal_semaphores = array::from_ref(&render_complete_sem);
 		let submits = &[vk::SubmitInfo::default()
 			.wait_semaphores(wait_semaphores)
 			.wait_dst_stage_mask(wait_stages)
@@ -946,9 +949,9 @@ impl TriangleApplication {
 				.unwrap();
 		}
 
-		let wait_semaphores = &[render_complete_sem];
-		let swapchains = &[self.swapchain];
-		let image_indices = &[image_index];
+		let wait_semaphores = array::from_ref(&render_complete_sem);
+		let swapchains = array::from_ref(&self.swapchain);
+		let image_indices = array::from_ref(&image_index);
 		let present_info = vk::PresentInfoKHR::default()
 			.wait_semaphores(wait_semaphores)
 			.swapchains(swapchains)
