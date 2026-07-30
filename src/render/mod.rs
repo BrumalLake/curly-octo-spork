@@ -1,3 +1,6 @@
+mod vertex;
+use vertex::Vertex;
+
 use std::{
 	array,
 	borrow::Cow,
@@ -57,12 +60,20 @@ pub struct TriangleApplication {
 	draw_fences: Vec<vk::Fence>,
 	present_complete_sems: Vec<vk::Semaphore>,
 	render_complete_sems: Vec<vk::Semaphore>,
+	vertex_buffer: vk::Buffer,
+	vertex_buffer_memory: vk::DeviceMemory,
 	// must be on the heap because stack addresses are not consistent with FFI
 	// modified in glfw callback
 	framebuffer_resized: Box<bool>,
 }
 
 impl TriangleApplication {
+	const VERTICES: &[Vertex] = &Vertex::create_vertices([
+		([0.0, -0.5], [1.0, 0.0, 0.0]),
+		([0.5, 0.5], [0.0, 1.0, 0.0]),
+		([-0.5, 0.5], [0.0, 0.0, 1.0]),
+	]);
+
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -108,6 +119,8 @@ impl TriangleApplication {
 			Self::create_graphics_pipeline(&device, surface_format, extent);
 		let command_pool = Self::create_command_pool(&device, graphics_queue_index);
 		let command_buffers = Self::create_command_buffers(&device, command_pool);
+		let (vertex_buffer, vertex_buffer_memory) =
+			Self::create_vertex_buffer(&instance, &device, physical_device);
 		let (draw_fences, present_complete_sems, render_complete_sems) =
 			Self::create_sync_objects(&device, &swapchain_images);
 
@@ -137,6 +150,8 @@ impl TriangleApplication {
 			draw_fences,
 			present_complete_sems,
 			render_complete_sems,
+			vertex_buffer,
+			vertex_buffer_memory,
 			framebuffer_resized: Box::new(false),
 		}
 	}
@@ -617,7 +632,11 @@ impl TriangleApplication {
 
 		let stages = &[vertex_stage_info, fragment_stage_info];
 
-		let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+		let binding_descriptions = &[Vertex::BINDING_DESCRIPTION];
+		let attribute_descriptions = Vertex::ATTRIBUTE_DESCRIPTIONS;
+		let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+			.vertex_binding_descriptions(binding_descriptions)
+			.vertex_attribute_descriptions(attribute_descriptions);
 
 		let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
 			.topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -770,6 +789,13 @@ impl TriangleApplication {
 				self.pipeline,
 			);
 
+			self.device.cmd_bind_vertex_buffers(
+				command_buffer,
+				0,
+				array::from_ref(&self.vertex_buffer),
+				&[0],
+			);
+
 			self.device.cmd_set_viewport(
 				command_buffer,
 				0,
@@ -791,7 +817,8 @@ impl TriangleApplication {
 				}],
 			);
 
-			self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
+			self.device
+				.cmd_draw(command_buffer, Self::VERTICES.len() as u32, 1, 0, 0);
 
 			self.device.cmd_end_rendering(command_buffer);
 		}
@@ -845,6 +872,74 @@ impl TriangleApplication {
 			self.device
 				.cmd_pipeline_barrier2(self.command_buffers[frame_index], &dependency_info)
 		};
+	}
+
+	fn create_vertex_buffer(
+		instance: &Instance,
+		device: &Device,
+		physical_device: vk::PhysicalDevice,
+	) -> (vk::Buffer, vk::DeviceMemory) {
+		let create_info = vk::BufferCreateInfo::default()
+			.size(std::mem::size_of_val(Self::VERTICES) as u64)
+			.usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+			.sharing_mode(vk::SharingMode::EXCLUSIVE);
+		let vertex_buffer = unsafe { device.create_buffer(&create_info, None) }.unwrap();
+
+		let mem_requirements = unsafe { device.get_buffer_memory_requirements(vertex_buffer) };
+
+		let alloc_info = vk::MemoryAllocateInfo::default()
+			.allocation_size(mem_requirements.size)
+			.memory_type_index(Self::find_memory_type(
+				instance,
+				physical_device,
+				mem_requirements.memory_type_bits,
+				vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+			));
+		let vertex_buffer_memory = unsafe { device.allocate_memory(&alloc_info, None) }.unwrap();
+
+		unsafe {
+			device
+				.bind_buffer_memory(vertex_buffer, vertex_buffer_memory, 0)
+				.unwrap();
+			let buf = device
+				.map_memory(
+					vertex_buffer_memory,
+					0,
+					create_info.size,
+					vk::MemoryMapFlags::empty(),
+				)
+				.unwrap();
+			std::ptr::copy_nonoverlapping(
+				Self::VERTICES.as_ptr(),
+				buf as *mut Vertex,
+				Self::VERTICES.len(),
+			);
+			device.unmap_memory(vertex_buffer_memory);
+		};
+
+		(vertex_buffer, vertex_buffer_memory)
+	}
+
+	fn find_memory_type(
+		instance: &Instance,
+		physical_device: vk::PhysicalDevice,
+		type_filter: u32,
+		properties: vk::MemoryPropertyFlags,
+	) -> u32 {
+		let mem_properties =
+			unsafe { instance.get_physical_device_memory_properties(physical_device) };
+
+		for i in 0..mem_properties.memory_type_count {
+			if type_filter & 1 << i != 0
+				&& mem_properties.memory_types[i as usize]
+					.property_flags
+					.contains(properties)
+			{
+				return i;
+			}
+		}
+
+		todo!()
 	}
 
 	fn create_sync_objects(
@@ -1036,6 +1131,8 @@ impl Default for TriangleApplication {
 impl Drop for TriangleApplication {
 	fn drop(&mut self) {
 		unsafe {
+			self.device.destroy_buffer(self.vertex_buffer, None);
+			self.device.free_memory(self.vertex_buffer_memory, None);
 			for &sem in self.render_complete_sems.iter() {
 				self.device.destroy_semaphore(sem, None);
 			}
