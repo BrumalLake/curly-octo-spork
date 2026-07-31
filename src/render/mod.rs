@@ -119,8 +119,13 @@ impl TriangleApplication {
 			Self::create_graphics_pipeline(&device, surface_format, extent);
 		let command_pool = Self::create_command_pool(&device, graphics_queue_index);
 		let command_buffers = Self::create_command_buffers(&device, command_pool);
-		let (vertex_buffer, vertex_buffer_memory) =
-			Self::create_vertex_buffer(&instance, &device, physical_device);
+		let (vertex_buffer, vertex_buffer_memory) = Self::create_vertex_buffer(
+			&instance,
+			&device,
+			physical_device,
+			command_pool,
+			graphics_queue,
+		);
 		let (draw_fences, present_complete_sems, render_complete_sems) =
 			Self::create_sync_objects(&device, &swapchain_images);
 
@@ -874,18 +879,21 @@ impl TriangleApplication {
 		};
 	}
 
-	fn create_vertex_buffer(
+	fn create_buffer(
 		instance: &Instance,
 		device: &Device,
 		physical_device: vk::PhysicalDevice,
+		usage: vk::BufferUsageFlags,
+		properties: vk::MemoryPropertyFlags,
+		size: u64,
 	) -> (vk::Buffer, vk::DeviceMemory) {
 		let create_info = vk::BufferCreateInfo::default()
-			.size(std::mem::size_of_val(Self::VERTICES) as u64)
-			.usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+			.size(size)
+			.usage(usage)
 			.sharing_mode(vk::SharingMode::EXCLUSIVE);
-		let vertex_buffer = unsafe { device.create_buffer(&create_info, None) }.unwrap();
+		let buffer = unsafe { device.create_buffer(&create_info, None) }.unwrap();
 
-		let mem_requirements = unsafe { device.get_buffer_memory_requirements(vertex_buffer) };
+		let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 
 		let alloc_info = vk::MemoryAllocateInfo::default()
 			.allocation_size(mem_requirements.size)
@@ -893,31 +901,120 @@ impl TriangleApplication {
 				instance,
 				physical_device,
 				mem_requirements.memory_type_bits,
-				vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+				properties,
 			));
-		let vertex_buffer_memory = unsafe { device.allocate_memory(&alloc_info, None) }.unwrap();
+		let buffer_memory = unsafe { device.allocate_memory(&alloc_info, None) }.unwrap();
 
 		unsafe {
-			device
-				.bind_buffer_memory(vertex_buffer, vertex_buffer_memory, 0)
-				.unwrap();
+			device.bind_buffer_memory(buffer, buffer_memory, 0).unwrap();
+		}
+
+		(buffer, buffer_memory)
+	}
+
+	fn create_vertex_buffer(
+		instance: &Instance,
+		device: &Device,
+		physical_device: vk::PhysicalDevice,
+		command_pool: vk::CommandPool,
+		queue: vk::Queue,
+	) -> (vk::Buffer, vk::DeviceMemory) {
+		let size = std::mem::size_of_val(Self::VERTICES) as u64;
+		let (transfer_buffer, transfer_buffer_memory) = Self::create_buffer(
+			instance,
+			device,
+			physical_device,
+			vk::BufferUsageFlags::TRANSFER_SRC,
+			vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+			size,
+		);
+
+		unsafe {
 			let buf = device
-				.map_memory(
-					vertex_buffer_memory,
-					0,
-					create_info.size,
-					vk::MemoryMapFlags::empty(),
-				)
+				.map_memory(transfer_buffer_memory, 0, size, vk::MemoryMapFlags::empty())
 				.unwrap();
 			std::ptr::copy_nonoverlapping(
 				Self::VERTICES.as_ptr(),
 				buf as *mut Vertex,
 				Self::VERTICES.len(),
 			);
-			device.unmap_memory(vertex_buffer_memory);
+			device.unmap_memory(transfer_buffer_memory);
 		};
 
+		let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer(
+			instance,
+			device,
+			physical_device,
+			vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+			vk::MemoryPropertyFlags::DEVICE_LOCAL,
+			size,
+		);
+
+		Self::copy_buffer(
+			device,
+			command_pool,
+			queue,
+			transfer_buffer,
+			vertex_buffer,
+			size,
+		);
+
+		unsafe {
+			device.free_memory(transfer_buffer_memory, None);
+			device.destroy_buffer(transfer_buffer, None);
+		}
+
 		(vertex_buffer, vertex_buffer_memory)
+	}
+
+	fn copy_buffer(
+		device: &Device,
+		command_pool: vk::CommandPool,
+		queue: vk::Queue,
+		src: vk::Buffer,
+		dst: vk::Buffer,
+		size: vk::DeviceSize,
+	) {
+		let command_buffer = unsafe {
+			device.allocate_command_buffers(
+				&vk::CommandBufferAllocateInfo::default()
+					.command_pool(command_pool)
+					.level(vk::CommandBufferLevel::PRIMARY)
+					.command_buffer_count(1),
+			)
+		}
+		.unwrap()[0];
+
+		unsafe {
+			device
+				.begin_command_buffer(
+					command_buffer,
+					&vk::CommandBufferBeginInfo::default()
+						.flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+				)
+				.unwrap();
+
+			device.cmd_copy_buffer(
+				command_buffer,
+				src,
+				dst,
+				&[vk::BufferCopy::default().size(size)],
+			);
+
+			device.end_command_buffer(command_buffer).unwrap();
+
+			device
+				.queue_submit(
+					queue,
+					&[vk::SubmitInfo::default()
+						.command_buffers(std::array::from_ref(&command_buffer))],
+					vk::Fence::null(),
+				)
+				.unwrap();
+
+			device.device_wait_idle().unwrap();
+			device.free_command_buffers(command_pool, std::array::from_ref(&command_buffer));
+		}
 	}
 
 	fn find_memory_type(
