@@ -1381,7 +1381,6 @@ unsafe extern "C" fn resize_callback(
 	_height: std::ffi::c_int,
 ) {
 	let framebuffer_resized = unsafe { glfwGetWindowUserPointer(window) as *mut bool };
-	// unsafe { (glfwGetWindowUserPointer(window) as *mut TriangleApplication).as_mut() }.unwrap();
 	unsafe {
 		*framebuffer_resized = true;
 	}
