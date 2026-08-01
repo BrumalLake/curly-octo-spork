@@ -62,6 +62,8 @@ pub struct TriangleApplication {
 	render_complete_sems: Vec<vk::Semaphore>,
 	vertex_buffer: vk::Buffer,
 	vertex_buffer_memory: vk::DeviceMemory,
+	index_buffer: vk::Buffer,
+	index_buffer_memory: vk::DeviceMemory,
 	// must be on the heap because stack addresses are not consistent with FFI
 	// modified in glfw callback
 	framebuffer_resized: Box<bool>,
@@ -69,10 +71,13 @@ pub struct TriangleApplication {
 
 impl TriangleApplication {
 	const VERTICES: &[Vertex] = &Vertex::create_vertices([
-		([0.0, -0.5], [1.0, 0.0, 0.0]),
-		([0.5, 0.5], [0.0, 1.0, 0.0]),
-		([-0.5, 0.5], [0.0, 0.0, 1.0]),
+		([-0.5, -0.5], [1.0, 0.0, 0.0]),
+		([0.5, -0.5], [0.0, 1.0, 0.0]),
+		([0.5, 0.5], [0.0, 0.0, 1.0]),
+		([-0.5, 0.5], [1.0, 1.0, 1.0]),
 	]);
+
+	const INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];
 
 	pub fn new() -> Self {
 		Self::default()
@@ -126,6 +131,13 @@ impl TriangleApplication {
 			command_pool,
 			graphics_queue,
 		);
+		let (index_buffer, index_buffer_memory) = Self::create_index_buffer(
+			&instance,
+			&device,
+			physical_device,
+			command_pool,
+			graphics_queue,
+		);
 		let (draw_fences, present_complete_sems, render_complete_sems) =
 			Self::create_sync_objects(&device, &swapchain_images);
 
@@ -157,6 +169,8 @@ impl TriangleApplication {
 			render_complete_sems,
 			vertex_buffer,
 			vertex_buffer_memory,
+			index_buffer,
+			index_buffer_memory,
 			framebuffer_resized: Box::new(false),
 		}
 	}
@@ -801,6 +815,13 @@ impl TriangleApplication {
 				&[0],
 			);
 
+			self.device.cmd_bind_index_buffer(
+				command_buffer,
+				self.index_buffer,
+				0,
+				vk::IndexType::UINT16,
+			);
+
 			self.device.cmd_set_viewport(
 				command_buffer,
 				0,
@@ -823,7 +844,7 @@ impl TriangleApplication {
 			);
 
 			self.device
-				.cmd_draw(command_buffer, Self::VERTICES.len() as u32, 1, 0, 0);
+				.cmd_draw_indexed(command_buffer, Self::INDICES.len() as u32, 1, 0, 0, 0);
 
 			self.device.cmd_end_rendering(command_buffer);
 		}
@@ -920,7 +941,7 @@ impl TriangleApplication {
 		queue: vk::Queue,
 	) -> (vk::Buffer, vk::DeviceMemory) {
 		let size = std::mem::size_of_val(Self::VERTICES) as u64;
-		let (transfer_buffer, transfer_buffer_memory) = Self::create_buffer(
+		let (staging_buffer, staging_buffer_memory) = Self::create_buffer(
 			instance,
 			device,
 			physical_device,
@@ -931,14 +952,14 @@ impl TriangleApplication {
 
 		unsafe {
 			let buf = device
-				.map_memory(transfer_buffer_memory, 0, size, vk::MemoryMapFlags::empty())
+				.map_memory(staging_buffer_memory, 0, size, vk::MemoryMapFlags::empty())
 				.unwrap();
 			std::ptr::copy_nonoverlapping(
 				Self::VERTICES.as_ptr(),
-				buf as *mut Vertex,
+				buf as *mut _,
 				Self::VERTICES.len(),
 			);
-			device.unmap_memory(transfer_buffer_memory);
+			device.unmap_memory(staging_buffer_memory);
 		};
 
 		let (vertex_buffer, vertex_buffer_memory) = Self::create_buffer(
@@ -954,14 +975,14 @@ impl TriangleApplication {
 			device,
 			command_pool,
 			queue,
-			transfer_buffer,
+			staging_buffer,
 			vertex_buffer,
 			size,
 		);
 
 		unsafe {
-			device.free_memory(transfer_buffer_memory, None);
-			device.destroy_buffer(transfer_buffer, None);
+			device.destroy_buffer(staging_buffer, None);
+			device.free_memory(staging_buffer_memory, None);
 		}
 
 		(vertex_buffer, vertex_buffer_memory)
@@ -1015,6 +1036,62 @@ impl TriangleApplication {
 			device.device_wait_idle().unwrap();
 			device.free_command_buffers(command_pool, std::array::from_ref(&command_buffer));
 		}
+	}
+
+	fn create_index_buffer(
+		instance: &Instance,
+		device: &Device,
+		physical_device: vk::PhysicalDevice,
+		command_pool: vk::CommandPool,
+		queue: vk::Queue,
+	) -> (vk::Buffer, vk::DeviceMemory) {
+		let size = std::mem::size_of_val(Self::INDICES) as u64;
+
+		let (staging_buffer, staging_buffer_memory) = Self::create_buffer(
+			instance,
+			device,
+			physical_device,
+			vk::BufferUsageFlags::TRANSFER_SRC,
+			vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+			size,
+		);
+
+		unsafe {
+			let buf = device
+				.map_memory(staging_buffer_memory, 0, size, vk::MemoryMapFlags::empty())
+				.unwrap();
+			std::ptr::copy_nonoverlapping(
+				Self::INDICES.as_ptr(),
+				buf as *mut _,
+				Self::INDICES.len(),
+			);
+			device.unmap_memory(staging_buffer_memory);
+		}
+
+		let (index_buffer, index_buffer_memory) = Self::create_buffer(
+			instance,
+			device,
+			physical_device,
+			vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+			vk::MemoryPropertyFlags::DEVICE_LOCAL,
+			size,
+		);
+
+		Self::copy_buffer(
+			device,
+			command_pool,
+			queue,
+			staging_buffer,
+			index_buffer,
+			size,
+		);
+
+		unsafe {
+			device.destroy_buffer(staging_buffer, None);
+			device.free_memory(staging_buffer_memory, None);
+		}
+
+		(index_buffer, index_buffer_memory)
 	}
 
 	fn find_memory_type(
@@ -1228,7 +1305,9 @@ impl Default for TriangleApplication {
 impl Drop for TriangleApplication {
 	fn drop(&mut self) {
 		unsafe {
+			self.device.destroy_buffer(self.index_buffer, None);
 			self.device.destroy_buffer(self.vertex_buffer, None);
+			self.device.free_memory(self.index_buffer_memory, None);
 			self.device.free_memory(self.vertex_buffer_memory, None);
 			for &sem in self.render_complete_sems.iter() {
 				self.device.destroy_semaphore(sem, None);
