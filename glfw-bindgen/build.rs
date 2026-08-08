@@ -10,7 +10,6 @@ fn main() {
 		.header("wrapper.h")
 		// glfw flags are i32
 		.default_macro_constant_type(bindgen::MacroTypeVariation::Signed)
-		.clang_arg("-DGLFW_INCLUDE_VULKAN")
 		.generate()
 		.unwrap();
 
