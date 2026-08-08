@@ -8,5 +8,5 @@ edition = "2024"
 
 [dependencies]
 ash = { version = "0.38.0", features = ["linked"] }
-nalgebra = "0.35.0"
 glfw = { package = "glfw-bindgen", path = "glfw-bindgen" }
+nalgebra-glm = "0.21.0"

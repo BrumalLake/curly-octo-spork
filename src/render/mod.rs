@@ -1,4 +1,8 @@
+mod uniform_buffer;
 mod vertex;
+
+extern crate nalgebra_glm as glm;
+use uniform_buffer::UniformBuffer;
 use vertex::Vertex;
 
 use std::{
@@ -9,6 +13,7 @@ use std::{
 	fs::File,
 	path::Path,
 	ptr::null_mut,
+	time,
 };
 
 use ash::{
@@ -53,17 +58,26 @@ pub struct TriangleApplication {
 	swapchain_images: Vec<vk::Image>,
 	swapchain_image_views: Vec<vk::ImageView>,
 	shader_module: vk::ShaderModule,
+	descriptor_set_layout: vk::DescriptorSetLayout,
+	descriptor_pool: vk::DescriptorPool,
+	descriptor_sets: Vec<vk::DescriptorSet>,
 	pipeline_layout: vk::PipelineLayout,
 	pipeline: vk::Pipeline,
 	command_pool: vk::CommandPool,
 	command_buffers: Vec<vk::CommandBuffer>,
+
 	draw_fences: Vec<vk::Fence>,
 	present_complete_sems: Vec<vk::Semaphore>,
 	render_complete_sems: Vec<vk::Semaphore>,
+
 	vertex_buffer: vk::Buffer,
 	vertex_buffer_memory: vk::DeviceMemory,
 	index_buffer: vk::Buffer,
 	index_buffer_memory: vk::DeviceMemory,
+	uniform_buffers: Vec<vk::Buffer>,
+	uniform_buffers_mem: Vec<vk::DeviceMemory>,
+	uniform_buffers_mapped: Vec<*mut UniformBuffer>,
+
 	// must be on the heap because stack addresses are not consistent with FFI
 	// modified in glfw callback
 	framebuffer_resized: Box<bool>,
@@ -120,8 +134,9 @@ impl TriangleApplication {
 			);
 		let swapchain_image_views =
 			Self::create_imageviews(&device, surface_format, &swapchain_images);
+		let descriptor_set_layout = Self::create_descriptor_set_layout(&device);
 		let (pipeline, pipeline_layout, shader_module) =
-			Self::create_graphics_pipeline(&device, surface_format, extent);
+			Self::create_graphics_pipeline(&device, surface_format, extent, descriptor_set_layout);
 		let command_pool = Self::create_command_pool(&device, graphics_queue_index);
 		let command_buffers = Self::create_command_buffers(&device, command_pool);
 		let (vertex_buffer, vertex_buffer_memory) = Self::create_vertex_buffer(
@@ -137,6 +152,15 @@ impl TriangleApplication {
 			physical_device,
 			command_pool,
 			graphics_queue,
+		);
+		let (uniform_buffers, uniform_buffers_mem, uniform_buffers_mapped) =
+			Self::create_uniform_buffers(&instance, &device, physical_device);
+		let descriptor_pool = Self::create_descriptor_pool(&device);
+		let descriptor_sets = Self::create_descriptor_sets(
+			&device,
+			descriptor_pool,
+			descriptor_set_layout,
+			&uniform_buffers,
 		);
 		let (draw_fences, present_complete_sems, render_complete_sems) =
 			Self::create_sync_objects(&device, &swapchain_images);
@@ -160,6 +184,9 @@ impl TriangleApplication {
 			swapchain_images,
 			swapchain_image_views,
 			shader_module,
+			descriptor_set_layout,
+			descriptor_pool,
+			descriptor_sets,
 			pipeline_layout,
 			pipeline,
 			command_pool,
@@ -171,6 +198,9 @@ impl TriangleApplication {
 			vertex_buffer_memory,
 			index_buffer,
 			index_buffer_memory,
+			uniform_buffers,
+			uniform_buffers_mem,
+			uniform_buffers_mapped,
 			framebuffer_resized: Box::new(false),
 		}
 	}
@@ -631,10 +661,30 @@ impl TriangleApplication {
 		image_views
 	}
 
+	fn create_descriptor_set_layout(device: &Device) -> vk::DescriptorSetLayout {
+		let uniform_buffer_layout_binding = vk::DescriptorSetLayoutBinding::default()
+			.binding(0)
+			.descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+			.descriptor_count(1)
+			.stage_flags(vk::ShaderStageFlags::VERTEX);
+
+		let descriptor_set_layout = unsafe {
+			device.create_descriptor_set_layout(
+				&vk::DescriptorSetLayoutCreateInfo::default()
+					.bindings(std::array::from_ref(&uniform_buffer_layout_binding)),
+				None,
+			)
+		}
+		.unwrap();
+
+		descriptor_set_layout
+	}
+
 	fn create_graphics_pipeline(
 		device: &Device,
 		surface_format: vk::SurfaceFormatKHR,
 		extent: vk::Extent2D,
+		descriptor_set_layout: vk::DescriptorSetLayout,
 	) -> (vk::Pipeline, vk::PipelineLayout, vk::ShaderModule) {
 		let shader_module =
 			Self::create_shader_module(device, concat!(env!("OUT_DIR"), "/shader.spv"));
@@ -687,7 +737,7 @@ impl TriangleApplication {
 			.rasterizer_discard_enable(false)
 			.polygon_mode(vk::PolygonMode::FILL)
 			.cull_mode(vk::CullModeFlags::BACK)
-			.front_face(vk::FrontFace::CLOCKWISE)
+			.front_face(vk::FrontFace::COUNTER_CLOCKWISE)
 			.depth_bias_enable(false)
 			.line_width(1.0);
 
@@ -702,7 +752,8 @@ impl TriangleApplication {
 		let color_blend =
 			vk::PipelineColorBlendStateCreateInfo::default().attachments(color_blend_attachments);
 
-		let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+		let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+			.set_layouts(std::array::from_ref(&descriptor_set_layout));
 		let pipeline_layout =
 			unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }.unwrap();
 
@@ -841,6 +892,16 @@ impl TriangleApplication {
 					offset: vk::Offset2D { x: 0, y: 0 },
 					extent: self.extent,
 				}],
+			);
+
+			self.device.cmd_bind_descriptor_sets(
+				command_buffer,
+				// descriptor sets are not unique to graphics pipelines, so this must be specified unlike with vertex and index buffers
+				vk::PipelineBindPoint::GRAPHICS,
+				self.pipeline_layout,
+				0,
+				array::from_ref(&self.descriptor_sets[frame_index]),
+				&[],
 			);
 
 			self.device
@@ -1094,6 +1155,106 @@ impl TriangleApplication {
 		(index_buffer, index_buffer_memory)
 	}
 
+	fn create_uniform_buffers(
+		instance: &Instance,
+		device: &Device,
+		physical_device: vk::PhysicalDevice,
+	) -> (
+		Vec<vk::Buffer>,
+		Vec<vk::DeviceMemory>,
+		Vec<*mut UniformBuffer>,
+	) {
+		let mut uniform_buffers = Vec::new();
+		let mut uniform_buffers_mem = Vec::new();
+		let mut uniform_buffers_mapped = Vec::new();
+		uniform_buffers.reserve_exact(MAX_FRAMES_IN_FLIGHT);
+		uniform_buffers_mem.reserve_exact(MAX_FRAMES_IN_FLIGHT);
+		uniform_buffers_mapped.reserve_exact(MAX_FRAMES_IN_FLIGHT);
+
+		for _ in 0..MAX_FRAMES_IN_FLIGHT {
+			let size = std::mem::size_of::<UniformBuffer>() as u64;
+
+			let (buffer, memory) = Self::create_buffer(
+				instance,
+				device,
+				physical_device,
+				vk::BufferUsageFlags::UNIFORM_BUFFER,
+				vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+				size,
+			);
+
+			uniform_buffers.push(buffer);
+			uniform_buffers_mem.push(memory);
+			uniform_buffers_mapped.push(
+				unsafe { device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty()) }.unwrap()
+					as *mut _,
+			);
+		}
+
+		(uniform_buffers, uniform_buffers_mem, uniform_buffers_mapped)
+	}
+
+	fn create_descriptor_pool(device: &Device) -> vk::DescriptorPool {
+		unsafe {
+			device
+				.create_descriptor_pool(
+					&vk::DescriptorPoolCreateInfo::default()
+						.flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+						.max_sets(MAX_FRAMES_IN_FLIGHT as u32)
+						.pool_sizes(&[vk::DescriptorPoolSize {
+							ty: vk::DescriptorType::UNIFORM_BUFFER,
+							descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
+						}]),
+					None,
+				)
+				.unwrap()
+		}
+	}
+
+	fn create_descriptor_sets(
+		device: &Device,
+		descriptor_pool: vk::DescriptorPool,
+		descriptor_set_layout: vk::DescriptorSetLayout,
+		uniform_buffers: &[vk::Buffer],
+	) -> Vec<vk::DescriptorSet> {
+		let descriptor_sets = unsafe {
+			device.allocate_descriptor_sets(
+				&vk::DescriptorSetAllocateInfo::default()
+					.descriptor_pool(descriptor_pool)
+					.set_layouts(&[descriptor_set_layout; MAX_FRAMES_IN_FLIGHT]),
+			)
+		}
+		.unwrap();
+
+		unsafe {
+			let buffer_infos: Vec<_> = uniform_buffers
+				.iter()
+				.map(|&uniform_buffer| {
+					vk::DescriptorBufferInfo::default()
+						.buffer(uniform_buffer)
+						.range(std::mem::size_of::<UniformBuffer>() as u64)
+				})
+				.collect();
+
+			device.update_descriptor_sets(
+				&descriptor_sets
+					.iter()
+					.zip(buffer_infos.iter())
+					.map(|(&descriptor_set, buffer_info)| {
+						vk::WriteDescriptorSet::default()
+							.dst_set(descriptor_set)
+							.descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+							.descriptor_count(1)
+							.buffer_info(std::array::from_ref(buffer_info))
+					})
+					.collect::<Vec<_>>(),
+				&[],
+			);
+		}
+
+		descriptor_sets
+	}
+
 	fn find_memory_type(
 		instance: &Instance,
 		physical_device: vk::PhysicalDevice,
@@ -1154,17 +1315,18 @@ impl TriangleApplication {
 	fn main_loop(&mut self) {
 		unsafe {
 			let mut frame_index = 0;
+			let start_time = time::Instant::now();
 			while glfwWindowShouldClose(self.window) == GLFW_FALSE {
 				glfwPollEvents();
-				self.draw_frame(&mut frame_index);
+				self.draw_frame(&mut frame_index, start_time);
 			}
 
 			self.device.device_wait_idle().unwrap();
 		}
 	}
 
-	fn draw_frame(&mut self, frame_index: &mut usize) {
-		let command_buffer = array::from_ref(&self.command_buffers[*frame_index]);
+	fn draw_frame(&mut self, frame_index: &mut usize, start_time: time::Instant) {
+		let command_buffer = self.command_buffers[*frame_index];
 		let draw_fence = self.draw_fences[*frame_index];
 		let present_complete_sem = self.present_complete_sems[*frame_index];
 		// per image, so requires the image index to be acquired from swapchain
@@ -1201,6 +1363,8 @@ impl TriangleApplication {
 
 		self.record_command_buffer(image_index, *frame_index);
 
+		self.update_uniform_buffer(*frame_index, start_time);
+
 		render_complete_sem = self.render_complete_sems[image_index as usize];
 
 		let wait_semaphores = array::from_ref(&present_complete_sem);
@@ -1210,8 +1374,7 @@ impl TriangleApplication {
 			.wait_semaphores(wait_semaphores)
 			.wait_dst_stage_mask(wait_stages)
 			.signal_semaphores(signal_semaphores)
-			.command_buffers(command_buffer)];
-
+			.command_buffers(std::array::from_ref(&command_buffer))];
 		unsafe {
 			self.device
 				.queue_submit(self.graphics_queue, submits, draw_fence)
@@ -1238,6 +1401,38 @@ impl TriangleApplication {
 		}
 
 		*frame_index = (*frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
+	}
+
+	fn update_uniform_buffer(&mut self, frame_index: usize, start_time: time::Instant) {
+		let time = start_time.elapsed().as_secs_f32();
+
+		let uniform_buffer = UniformBuffer::new(
+			glm::rotate_z(&glm::Mat4::identity(), time * std::f32::consts::FRAC_PI_2), // spin 90 degrees per second
+			glm::look_at(
+				&glm::Vec3::new(2.0, 2.0, 2.0),
+				&glm::Vec3::zeros(),
+				&glm::Vec3::new(0.0, 0.0, 1.0),
+			),
+			{
+				let mut proj = glm::perspective(
+					self.extent.width as f32 / self.extent.height as f32,
+					45.0f32.to_radians(),
+					0.1,
+					10.0,
+				);
+				// vulkan y coordinate is flipped from opengl
+				proj[(1, 1)] *= -1.0;
+				proj
+			},
+		);
+
+		unsafe {
+			std::ptr::copy_nonoverlapping(
+				&uniform_buffer,
+				self.uniform_buffers_mapped[frame_index],
+				1,
+			);
+		}
 	}
 
 	fn recreate_swapchain(&mut self) {
@@ -1305,8 +1500,15 @@ impl Default for TriangleApplication {
 impl Drop for TriangleApplication {
 	fn drop(&mut self) {
 		unsafe {
+			for &buf in self.uniform_buffers.iter() {
+				self.device.destroy_buffer(buf, None);
+			}
 			self.device.destroy_buffer(self.index_buffer, None);
 			self.device.destroy_buffer(self.vertex_buffer, None);
+			for &mem in self.uniform_buffers_mem.iter() {
+				self.device.unmap_memory(mem);
+				self.device.free_memory(mem, None);
+			}
 			self.device.free_memory(self.index_buffer_memory, None);
 			self.device.free_memory(self.vertex_buffer_memory, None);
 			for &sem in self.render_complete_sems.iter() {
@@ -1321,6 +1523,13 @@ impl Drop for TriangleApplication {
 			self.device
 				.free_command_buffers(self.command_pool, &self.command_buffers);
 			self.device.destroy_command_pool(self.command_pool, None);
+			self.device
+				.free_descriptor_sets(self.descriptor_pool, &self.descriptor_sets)
+				.unwrap();
+			self.device
+				.destroy_descriptor_pool(self.descriptor_pool, None);
+			self.device
+				.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
 			self.device.destroy_pipeline(self.pipeline, None);
 			self.device
 				.destroy_pipeline_layout(self.pipeline_layout, None);

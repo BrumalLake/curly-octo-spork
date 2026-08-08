@@ -1,11 +1,11 @@
-use nalgebra::{self, Vector2, Vector3};
+extern crate nalgebra_glm as glm;
 
 use ash::vk;
 
 #[derive(Copy, Clone)]
 pub struct Vertex {
-	pos: Vector2<f32>,
-	color: Vector3<f32>,
+	pos: glm::Vec2,
+	color: glm::Vec3,
 }
 
 impl Vertex {
@@ -33,8 +33,8 @@ impl Vertex {
 
 	pub const fn new(pos: [f32; 2], color: [f32; 3]) -> Self {
 		Self {
-			pos: Vector2::new(pos[0], pos[1]),
-			color: Vector3::new(color[0], color[1], color[2]),
+			pos: glm::Vec2::new(pos[0], pos[1]),
+			color: glm::Vec3::new(color[0], color[1], color[2]),
 		}
 	}
 
