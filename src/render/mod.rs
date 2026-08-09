@@ -131,6 +131,7 @@ impl TriangleApplication {
 				physical_device,
 				surface,
 				window,
+				vk::SwapchainKHR::null(),
 			);
 		let swapchain_image_views =
 			Self::create_imageviews(&device, surface_format, &swapchain_images);
@@ -509,6 +510,7 @@ impl TriangleApplication {
 		physical_device: vk::PhysicalDevice,
 		surface: vk::SurfaceKHR,
 		window: *mut GLFWwindow,
+		old_swapchain: vk::SwapchainKHR,
 	) -> (
 		vk::SwapchainKHR,
 		Vec<vk::Image>,
@@ -547,7 +549,8 @@ impl TriangleApplication {
 			.pre_transform(surface_capabilities.current_transform)
 			.composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
 			.present_mode(present_mode)
-			.clipped(true);
+			.clipped(true)
+			.old_swapchain(old_swapchain);
 
 		let device_swapchain_functions = khr::swapchain::Device::new(instance, device);
 
@@ -1453,9 +1456,9 @@ impl TriangleApplication {
 			for &view in self.swapchain_image_views.iter() {
 				self.device.destroy_image_view(view, None);
 			}
-			self.device_swapchain_functions
-				.destroy_swapchain(self.swapchain, None);
 		}
+
+		let old_swapchain = self.swapchain;
 
 		(
 			self.swapchain,
@@ -1470,7 +1473,13 @@ impl TriangleApplication {
 			self.physical_device,
 			self.surface,
 			self.window,
+			old_swapchain,
 		);
+
+		unsafe {
+			self.device_swapchain_functions
+				.destroy_swapchain(old_swapchain, None);
+		}
 
 		self.swapchain_image_views =
 			Self::create_imageviews(&self.device, self.surface_format, &self.swapchain_images);
